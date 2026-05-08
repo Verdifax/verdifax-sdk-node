@@ -1,0 +1,58 @@
+{
+  "name": "verdifax",
+  "version": "0.2.0",
+  "description": "Official Node.js / TypeScript SDK for the Verdifax orchestrator REST API.",
+  "license": "MIT",
+  "author": "Verdifax <team@verdifax.com>",
+  "homepage": "https://verdifax.com",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Verdifax/verdifax-sdk-node.git"
+  },
+  "keywords": [
+    "verdifax",
+    "attestation",
+    "ai",
+    "audit",
+    "compliance",
+    "manifest",
+    "hash",
+    "cryptographic",
+    "provenance",
+    "gdpr",
+    "hipaa"
+  ],
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --format cjs,esm --dts --clean",
+    "test": "node --test --test-reporter=spec test/*.test.mjs",
+    "test:build": "npm run build && npm test",
+    "lint": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.4.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}

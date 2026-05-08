@@ -1,0 +1,83 @@
+# Release workflow for verdifax-sdk-node.
+#
+# Triggers on `v*` git tag push. Verifies the type-check + tests
+# + build, then publishes to npm with provenance attestation.
+#
+# Provenance — npm's --provenance flag (in publishConfig as well)
+# turns the published package into a signed artifact whose
+# build origin is verifiable on the public Sigstore Rekor log.
+# Same trust model as the verifier-CLI distribution.
+#
+# To cut a new release:
+#
+#   $EDITOR package.json     # bump version
+#   npm install              # update package-lock
+#   git add package.json package-lock.json
+#   git commit -m "Release v0.2.0"
+#   git tag v0.2.0
+#   git push origin main v0.2.0
+#
+# Consumers update via:
+#
+#   npm install verdifax@0.2.0
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write    # GitHub Release creation
+  id-token: write    # npm provenance via Sigstore OIDC
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/verdifax
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          registry-url: "https://registry.npmjs.org/"
+
+      - name: Install
+        run: npm ci
+
+      - name: Type-check
+        run: npm run lint
+
+      - name: Build
+        run: npm run build
+
+      - name: Test
+        run: npm test
+
+      - name: Verify tag matches package.json version
+        run: |
+          tag="${GITHUB_REF##*/}"           # v0.2.0
+          tag_no_v="${tag#v}"               # 0.2.0
+          pkg=$(node -p "require('./package.json').version")
+          if [ "$tag_no_v" != "$pkg" ]; then
+            echo "::error::tag $tag does not match package.json version $pkg"
+            exit 1
+          fi
+
+      - name: Publish to npm with provenance
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
