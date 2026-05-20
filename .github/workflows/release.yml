@@ -73,9 +73,15 @@ jobs:
           fi
 
       - name: Publish to npm with provenance
+        # Authentication is via npm Trusted Publishing (OIDC), configured
+        # on the npmjs.com `verdifax` package settings — no NPM_TOKEN
+        # secret needed. The `id-token: write` permission at the workflow
+        # level provides the Sigstore OIDC token; npm validates the OIDC
+        # claims against the Trusted Publisher config (org=Verdifax,
+        # repo=verdifax-sdk-node, workflow=release.yml, environment=npm)
+        # before accepting the publish. The same OIDC token also signs
+        # the provenance artifact.
         run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
