@@ -3,7 +3,7 @@
 # Triggers on `v*` git tag push. Verifies the type-check + tests
 # + build, then publishes to npm with provenance attestation.
 #
-# Provenance — npm's --provenance flag (in publishConfig as well)
+# Provenance, npm's --provenance flag (in publishConfig as well)
 # turns the published package into a signed artifact whose
 # build origin is verifiable on the public Sigstore Rekor log.
 # Same trust model as the verifier-CLI distribution.
@@ -53,7 +53,7 @@ jobs:
       # npm Trusted Publishing (OIDC) requires npm CLI v11.5.0 or newer.
       # Node 20 LTS ships with npm 10.x by default, which does not
       # auto-detect Trusted Publisher config and falls back to no-auth
-      # publish — which the registry rejects with a misleading 404. This
+      # publish, which the registry rejects with a misleading 404. This
       # upgrade step pulls the latest npm 11.x into the runner image
       # before any publish work happens.
       - name: Upgrade npm to v11+ for Trusted Publishing
@@ -83,7 +83,7 @@ jobs:
 
       - name: Publish to npm with provenance
         # Authentication is via npm Trusted Publishing (OIDC), configured
-        # on the npmjs.com `verdifax` package settings — no NPM_TOKEN
+        # on the npmjs.com `verdifax` package settings, no NPM_TOKEN
         # secret needed. The `id-token: write` permission at the workflow
         # level provides the Sigstore OIDC token; npm validates the OIDC
         # claims against the Trusted Publisher config (org=Verdifax,

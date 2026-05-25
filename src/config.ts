@@ -1,5 +1,5 @@
 /**
- * Environment-variable constructor — mirrors the Python SDK's
+ * Environment-variable constructor, mirrors the Python SDK's
  * `from_env()` and the Go SDK's `FromEnv()` for polyglot parity.
  *
  * Variables consumed (identical names across SDKs):

@@ -39,7 +39,7 @@ console.log(`Sealed run ${run.run_id}, manifest hash ${run.manifest.ManifestHash
 // Verify the seal recomputes correctly.
 const v = await client.verifyRun(run.run_id);
 if (v.verified) {
-  console.log("✓ Manifest hash recomputes — run is intact.");
+  console.log("✓ Manifest hash recomputes, run is intact.");
 }
 ```
 
@@ -73,7 +73,7 @@ curl -X POST https://api.verdifax.com/admin/keys \
   -d '{"name": "node-sdk-prod"}'
 ```
 
-The response carries the secret **once** — store it immediately.
+The response carries the secret **once**, store it immediately.
 
 ## Error handling
 
@@ -91,18 +91,18 @@ try {
   } else if (err instanceof AuthError) {
     // missing or invalid API key
   } else if (err instanceof APIError) {
-    // every other non-2xx — err.status carries the HTTP code
+    // every other non-2xx, err.status carries the HTTP code
   }
 }
 ```
 
 ## Trust model
 
-This SDK only mediates HTTP I/O — it does NOT verify sealed
+This SDK only mediates HTTP I/O, it does NOT verify sealed
 manifests on its own. For offline verification with no Verdifax
 dependency, use the [`verdifax-pepg-verify`](https://github.com/Verdifax/verdifax-orchestrator/tree/main/cmd/verdifax-pepg-verify)
 CLI (signed binary distributed via GitHub Releases).
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE).

@@ -27,7 +27,7 @@ export class VerdifaxError extends Error {
   override readonly name: string = "VerdifaxError";
 }
 
-/** HTTP 401 — missing or invalid API key. */
+/** HTTP 401, missing or invalid API key. */
 export class AuthError extends VerdifaxError {
   override readonly name: string = "VerdifaxAuthError";
   constructor(
@@ -38,7 +38,7 @@ export class AuthError extends VerdifaxError {
   }
 }
 
-/** HTTP 404 — resource not found. Carries the path that 404'd
+/** HTTP 404, resource not found. Carries the path that 404'd
  *  for easier diagnosis. */
 export class NotFoundError extends VerdifaxError {
   override readonly name: string = "VerdifaxNotFoundError";

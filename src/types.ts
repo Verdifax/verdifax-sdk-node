@@ -7,7 +7,7 @@
  * keep the SDK's surface in sync.
  */
 
-/** A 64-character lowercase hex string — the canonical §0
+/** A 64-character lowercase hex string, the canonical §0
  *  SHA-256 encoding. Aliased rather than newtyped so callers
  *  pass plain strings without ceremony. */
 export type Hex64 = string;
@@ -70,7 +70,7 @@ export interface ExecuteResponse {
  * Sealed manifest. Field names match the orchestrator's Go-default
  * JSON encoding (CapitalCamelCase).
  *
- * Subset of the canonical fields — see the orchestrator's
+ * Subset of the canonical fields, see the orchestrator's
  * `internal/pipeline/types.go` for the full struct. The fields
  * listed here are the ones every Track-2 / Track-3 / Track-5
  * surface depends on.
@@ -157,10 +157,10 @@ export interface ClientConfig {
 /** Friendly shape for {@link VerdifaxClient.attest}. Mirrors the
  *  Python SDK's `attest()` signature so polyglot teams have parity. */
 export interface AttestRequest {
-  /** Raw bytes — auto-base64-encoded before sending. Mutually
+  /** Raw bytes, auto-base64-encoded before sending. Mutually
    *  exclusive with `payload_text`. */
   payload?: Buffer | Uint8Array;
-  /** Plain-text payload — sent as-is. Mutually exclusive with
+  /** Plain-text payload, sent as-is. Mutually exclusive with
    *  `payload`. */
   payload_text?: string;
   program_id: Hex64;
@@ -240,7 +240,7 @@ export interface DCAEVerdict {
 }
 
 /** Body returned by `POST /admin/keys`. The `secret` field is
- *  shown ONCE — store it immediately. */
+ *  shown ONCE, store it immediately. */
 export interface AdminCreateKeyResponse {
   ok: boolean;
   id: number;
@@ -250,7 +250,7 @@ export interface AdminCreateKeyResponse {
 }
 
 /** Projection returned by {@link VerdifaxClient.adminListKeys}.
- *  Secrets are NEVER surfaced — only metadata. */
+ *  Secrets are NEVER surfaced, only metadata. */
 export interface AdminAPIKey {
   id: number;
   name: string;

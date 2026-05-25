@@ -67,7 +67,7 @@ const RETRYABLE_STATUSES = new Set([429, 502, 503, 504]);
  *
  * Idempotent GETs that hit a transient failure (502/503/504/429)
  * are retried with exponential backoff + full jitter. Non-
- * idempotent methods (POST, PUT, DELETE) are NOT retried — replay
+ * idempotent methods (POST, PUT, DELETE) are NOT retried, replay
  * is the caller's responsibility.
  */
 export class VerdifaxClient {
@@ -119,7 +119,7 @@ export class VerdifaxClient {
   }
 
   /** High-level convenience wrapper around `execute()`. Accepts
-   *  either a Buffer (for binary payloads — auto-base64) or a
+   *  either a Buffer (for binary payloads, auto-base64) or a
    *  string (for plain text). Validates the hex fields and
    *  routes the call through to the canonical /execute. */
   async attest(req: AttestRequest): Promise<ExecuteResponse> {
@@ -261,7 +261,7 @@ export class VerdifaxClient {
     return Buffer.from(buf);
   }
 
-  // ── CRES — deletion receipts (auth) ──────────────────────────
+  // ── CRES, deletion receipts (auth) ──────────────────────────
 
   async listDeletionReceipts(runId: number): Promise<DeletionReceipt[]> {
     this.requireAPIKey();
@@ -383,7 +383,7 @@ export class VerdifaxClient {
     });
   }
 
-  // ── HTTP plumbing — retry-aware ──────────────────────────────
+  // ── HTTP plumbing, retry-aware ──────────────────────────────
 
   private async request<T>(
     method: string,
@@ -469,7 +469,7 @@ export class VerdifaxClient {
       }
     }
 
-    // Defense — should never reach here.
+    // Defense, should never reach here.
     throw new VerdifaxError(
       `verdifax: retry budget exhausted${
         lastErr ? `: ${String(lastErr)}` : ""

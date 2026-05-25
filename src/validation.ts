@@ -1,5 +1,5 @@
 /**
- * Input-validation helpers — mirrors the Python SDK's
+ * Input-validation helpers, mirrors the Python SDK's
  * `_validation.py` and the Go SDK's `validation.go` for
  * cross-language parity.
  *
@@ -9,7 +9,7 @@
 
 import { VerdifaxError } from "./errors.js";
 
-/** Throws unless `value` is exactly 64 lowercase hex characters —
+/** Throws unless `value` is exactly 64 lowercase hex characters , 
  *  the §0-canonical SHA-256 encoding the orchestrator expects for
  *  program_id, registry_record_hash, manifest_hash, and
  *  ciphertext_hash. */
