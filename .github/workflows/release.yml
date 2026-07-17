@@ -46,17 +46,20 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          # Node 22 LTS: npm@latest (v12+ as of 2026-07) requires
+          # node ^22.22.2 || ^24 || >=26; the previous "20" pin broke
+          # the v0.2.3 release with EBADENGINE at the npm-upgrade step.
+          node-version: "22"
           cache: npm
           registry-url: "https://registry.npmjs.org/"
 
       # npm Trusted Publishing (OIDC) requires npm CLI v11.5.0 or newer.
-      # Node 20 LTS ships with npm 10.x by default, which does not
-      # auto-detect Trusted Publisher config and falls back to no-auth
-      # publish, which the registry rejects with a misleading 404. This
-      # upgrade step pulls the latest npm 11.x into the runner image
-      # before any publish work happens.
-      - name: Upgrade npm to v11+ for Trusted Publishing
+      # Older Node LTS images ship npm 10.x, which does not auto-detect
+      # Trusted Publisher config and falls back to no-auth publish,
+      # which the registry rejects with a misleading 404. This upgrade
+      # step pulls the latest npm into the runner image before any
+      # publish work happens.
+      - name: Upgrade npm for Trusted Publishing
         run: npm install -g npm@latest
 
       - name: Install
