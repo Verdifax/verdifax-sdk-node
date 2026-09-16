@@ -34,3 +34,6 @@ Thumbs.db
 .env
 .env.*
 !.env.example
+
+# Internal audit scope files (foundation-audit); never published
+.audit-scope-*.json
