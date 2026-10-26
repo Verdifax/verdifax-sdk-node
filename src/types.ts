@@ -138,7 +138,7 @@ export interface ClientConfig {
   baseURL?: string;
   /** X-Verdifax-Key value. Required for every endpoint except /health, /version, /dcae/verify. */
   apiKey?: string;
-  /** Per-request timeout in ms. Defaults to 30000. */
+  /** Per-request timeout in ms. Defaults to 90000. */
   timeoutMs?: number;
   /** Override the default User-Agent. Useful for telemetry attribution. */
   userAgent?: string;

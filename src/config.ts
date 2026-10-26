@@ -6,7 +6,7 @@
  *
  *   VERDIFAX_BASE_URL    base URL (defaults to https://api.verdifax.com)
  *   VERDIFAX_API_KEY     X-Verdifax-Key value
- *   VERDIFAX_TIMEOUT_MS  per-request timeout in ms (defaults to 30000)
+ *   VERDIFAX_TIMEOUT_MS  per-request timeout in ms (defaults to 90000)
  *   VERDIFAX_USER_AGENT  override the default User-Agent
  *   VERDIFAX_MAX_RETRIES retry budget for idempotent GETs (defaults to 3)
  */
