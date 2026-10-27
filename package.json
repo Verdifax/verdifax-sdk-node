@@ -1,6 +1,6 @@
 {
   "name": "verdifax",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "description": "Official Node.js / TypeScript SDK for the Verdifax orchestrator REST API.",
   "license": "MIT",
   "author": "Verdifax <team@verdifax.com>",
@@ -43,7 +43,7 @@
     "LICENSE"
   ],
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.0.0"
   },
   "scripts": {
     "build": "tsup src/index.ts --format cjs,esm --dts --clean",

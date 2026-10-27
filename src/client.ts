@@ -26,16 +26,17 @@ import type {
   VerifyResponse,
 } from "./types.js";
 import { validateHex64, validateRouteId } from "./validation.js";
+import { SDK_VERSION } from "./version.js";
 
 const DEFAULT_BASE_URL = "https://api.verdifax.com";
-// A sealed run makes two public-log entries and, when AI output is sent, an
+// A successful run makes two public-log entries and, when AI output is sent, an
 // AI review; on a slow day that takes longer than 30 seconds, and a client
 // that gave up then reported an error for a run the server went on to seal.
 // 90 seconds keeps the SDK from being the limit.
 const DEFAULT_TIMEOUT_MS = 90_000;
 const DEFAULT_MAX_RETRIES = 3;
 const DEFAULT_RETRY_BASE_DELAY_MS = 200;
-const SDK_USER_AGENT = "verdifax-sdk-node/0.2.0";
+const SDK_USER_AGENT = `verdifax-sdk-node/${SDK_VERSION}`;
 const HEADER_API_KEY = "X-Verdifax-Key";
 
 const RETRYABLE_STATUSES = new Set([429, 502, 503, 504]);

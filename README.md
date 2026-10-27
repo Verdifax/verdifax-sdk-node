@@ -2,7 +2,7 @@
 
 The official Node.js SDK for the [Verdifax](https://verdifax.com)
 orchestrator REST API. TypeScript-native, ships dual CJS+ESM,
-zero runtime dependencies (uses native `fetch` from Node 18+).
+zero runtime dependencies (uses native `fetch` from Node 20+).
 
 ## Install
 
@@ -14,7 +14,7 @@ yarn add verdifax
 pnpm add verdifax
 ```
 
-Requires Node 18 or newer.
+Requires Node 20 or newer, the oldest Node release line still maintained.
 
 ## Quickstart
 
@@ -100,8 +100,9 @@ try {
 
 This SDK only mediates HTTP I/O, it does NOT verify sealed
 manifests on its own. For offline verification with no Verdifax
-dependency, use the [`verdifax-pepg-verify`](https://github.com/Verdifax/verdifax-orchestrator/tree/main/cmd/verdifax-pepg-verify)
-CLI (signed binary distributed via GitHub Releases).
+dependency, use the open-source [`verdifax-verify`](https://github.com/Verdifax/verdifax-verify)
+CLI, v0.17.2 or later (signed binaries with SLSA provenance on its GitHub
+Releases), which checks both audit bundles and deny or halt receipts.
 
 ## License
 

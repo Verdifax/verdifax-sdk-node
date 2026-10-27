@@ -7,6 +7,11 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # A new TypeScript major changes type checking and needs its own
+    # migration (TypeScript 7 failed type-check on every Node version).
+    ignore:
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: github-actions
     directory: /
     schedule:
