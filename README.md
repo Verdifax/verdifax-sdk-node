@@ -2,7 +2,7 @@
 
 The official Node.js SDK for the [Verdifax](https://verdifax.com)
 orchestrator REST API. TypeScript-native, ships dual CJS+ESM,
-zero runtime dependencies (uses native `fetch` from Node 20+).
+zero runtime dependencies (uses native `fetch` from Node 22+).
 
 ## Install
 
@@ -14,7 +14,7 @@ yarn add verdifax
 pnpm add verdifax
 ```
 
-Requires Node 20 or newer, the oldest Node release line still maintained.
+Requires Node 22 or newer.
 
 ## Quickstart
 

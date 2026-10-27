@@ -5,8 +5,10 @@
 #   - npm run build                 : compile dual CJS+ESM
 #   - npm test                      : Node native test runner
 #
-# Test runtime is < 30 seconds. The SDK targets Node 18+ (native
-# fetch); the matrix exercises 18 / 20 / 22 LTS lines.
+# Test runtime is < 30 seconds. The SDK targets Node 22+ (native
+# fetch); the matrix runs every Node release line still maintained.
+# The release workflow calls this workflow and publishes only if
+# every version passes.
 
 name: CI
 
@@ -15,6 +17,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_call:
 
 permissions:
   contents: read
@@ -25,7 +28,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node-version: ["20", "22", "24"]
+        node-version: ["22", "24", "26"]
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

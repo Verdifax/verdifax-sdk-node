@@ -33,7 +33,13 @@ permissions:
   id-token: write    # npm provenance via Sigstore OIDC
 
 jobs:
+  # The full CI matrix, every maintained Node line; nothing is
+  # published unless it passes.
+  test:
+    uses: ./.github/workflows/ci.yml
+
   release:
+    needs: test
     runs-on: ubuntu-latest
     environment:
       name: npm
