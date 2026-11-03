@@ -53,7 +53,7 @@ export interface ExecuteRequest {
   program_id: Hex64;
   route_id: string;
   registry_record_hash: Hex64;
-  /** When non-empty, opts the request into the AIVP-T4 governance pipeline. */
+  /** When non-empty, opts the request into the AIVP governance pipeline. */
   ai_output_text?: string;
   /** Caller-attested actor + decision metadata; open schema. */
   attested_context?: Record<string, unknown>;

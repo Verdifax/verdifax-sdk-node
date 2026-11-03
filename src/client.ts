@@ -334,7 +334,7 @@ export class VerdifaxClient {
   // ── Provider helpers (Claude / OpenAI) ───────────────────────
 
   /** Convenience for attesting an Anthropic Claude API response.
-   *  Wires the response text into the AIVP-T4 governance pipeline
+   *  Wires the response text into the AIVP governance pipeline
    *  by setting `ai_output_text`. */
   async attestClaudeResponse(args: {
     program_id: Hex64;
