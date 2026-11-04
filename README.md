@@ -39,7 +39,7 @@ console.log(`Sealed run ${run.run_id}, manifest hash ${run.manifest.ManifestHash
 // Verify the seal recomputes correctly.
 const v = await client.verifyRun(run.run_id);
 if (v.verified) {
-  console.log("✓ Manifest hash recomputes, run is intact.");
+  console.log("✓ Manifest hash recomputes.");
 }
 ```
 
