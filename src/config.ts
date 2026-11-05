@@ -4,7 +4,9 @@
  *
  * Variables consumed (identical names across SDKs):
  *
- *   VERDIFAX_BASE_URL    base URL (defaults to https://api.verdifax.com)
+ *   VERDIFAX_BASE_URL    base URL, read first
+ *   VERDIFAX_API_URL     base URL, read when VERDIFAX_BASE_URL is unset
+ *                        (defaults to https://api.verdifax.com)
  *   VERDIFAX_API_KEY     X-Verdifax-Key value
  *   VERDIFAX_TIMEOUT_MS  per-request timeout in ms (defaults to 90000)
  *   VERDIFAX_USER_AGENT  override the default User-Agent
@@ -17,9 +19,10 @@ import type { ClientConfig } from "./types.js";
 
 export function fromEnv(): VerdifaxClient {
   const cfg: ClientConfig = {
-    baseURL: process.env.VERDIFAX_BASE_URL ?? undefined,
+    baseURL:
+      process.env.VERDIFAX_BASE_URL || process.env.VERDIFAX_API_URL || undefined,
     apiKey: process.env.VERDIFAX_API_KEY ?? undefined,
-    userAgent: process.env.VERDIFAX_USER_AGENT ?? undefined,
+    userAgent: process.env.VERDIFAX_USER_AGENT || undefined,
   };
 
   const timeoutRaw = process.env.VERDIFAX_TIMEOUT_MS;

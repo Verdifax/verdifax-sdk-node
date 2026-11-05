@@ -10,25 +10,39 @@ import {
   requestKeyRegistrationBody,
   signRequest,
 } from "./signing.js";
+import {
+  formatProviderPayload,
+  refuseCallerOriginHashes,
+  withExecuteFlags,
+} from "./helpers.js";
 import type {
   AdminAPIKey,
   AdminCreateKeyResponse,
   AdminEraseRequest,
+  AttestationList,
   AttestRequest,
   ClientConfig,
   DCAEProofBundle,
   DCAEVerdict,
   DeletionReceipt,
+  ExecuteBatchResponse,
   ExecuteRequest,
   ExecuteResponse,
+  ExportRunsParams,
   Health,
   Hex64,
+  ListAttestationsParams,
   ListRunsParams,
   PDFFormat,
   RequestKeyRegistration,
   Run,
+  RunsExport,
+  RunsExportCSV,
+  RunStats,
   RunSummary,
+  SearchRunsParams,
   VerdifaxVersion,
+  VerifyDeterminismResponse,
   VerifyResponse,
 } from "./types.js";
 import { validateHex64, validateRouteId } from "./validation.js";
@@ -47,7 +61,19 @@ const SDK_USER_AGENT = `verdifax-sdk-node/${SDK_VERSION}`;
 const HEADER_API_KEY = "X-Verdifax-Key";
 const REQUEST_KEY_PATH = "/keys/request-key";
 
+const HEADER_EXPORT_TOTAL = "X-Verdifax-Total";
+const HEADER_EXPORT_TRUNCATED = "X-Verdifax-Truncated";
+
 const RETRYABLE_STATUSES = new Set([429, 502, 503, 504]);
+
+/** The most rows POST /execute/batch accepts in one request. */
+export const MAX_BATCH_ROWS = 1000;
+
+/** A response body kept as sent, with its headers. */
+interface RawResponse {
+  text: string;
+  headers: Headers;
+}
 
 /**
  * The Verdifax SDK client.
@@ -58,17 +84,32 @@ const RETRYABLE_STATUSES = new Set([429, 502, 503, 504]);
  * | --- | --- | --- |
  * | `health()` | GET /health | none |
  * | `version()` | GET /version | none |
+ * | `getOpenAPI()` | GET /openapi.json | none |
+ * | `getStats()` | GET /stats | required |
  * | `execute(req)` | POST /execute | required |
  * | `attest(req)` | POST /execute (helper) | required |
  * | `getRun(id)` | GET /runs/{id} | required |
  * | `verifyRun(id)` | GET /runs/{id}/verify | required |
  * | `listRuns(params)` | GET /runs | required |
+ * | `searchRuns(params)` | GET /runs/search | required |
+ * | `exportRuns(params)` | GET /runs/export | required |
+ * | `exportRunsCSV(params)` | GET /runs/export?format=csv | required |
+ * | `listAttestations(params)` | GET /attestations | required |
+ * | `getAttestation(id)` | GET /attestations/{id} | required |
+ * | `getRunArtifacts(id)` | GET /runs/{id}/artifacts | required |
+ * | `getRunReport(id)` | GET /runs/{id}/report | required |
+ * | `getPublicBundle(id)` | GET /runs/{id}/bundle.json | none |
+ * | `getPublicBundleByToken(token)` | GET /public/runs/{token}/bundle.json | none |
+ * | `executeBatch(runs)` | POST /execute/batch | required |
+ * | `verifyDeterminism(req)` | POST /execute/verify-determinism | required |
  * | `downloadAuditPDF(id, format)` | GET /runs/{id}/report.pdf | required |
  * | `getAllowToken(id)` | GET /runs/{id}/allow-token | required |
  * | `getDenyReceipt(id)` | GET /runs/{id}/deny-receipt | required |
  * | `getCCVHaltReceipt(id)` | GET /runs/{id}/ccv-halt-receipt | required |
  * | `getMACCHaltReceipt(id)` | GET /runs/{id}/macc-halt-receipt | required |
  * | `getAivpT4HaltReceipt(id)` | GET /runs/{id}/aivp-t4-halt-receipt | required |
+ * | `getAttestationGapReceipt(id)` | GET /runs/{id}/attestation-gap-receipt | required |
+ * | `getCESAuditRecord(id)` | GET /runs/{id}/ces-audit-record | required |
  * | `listDeletionReceipts(id)` | GET /runs/{id}/deletion-receipts | required |
  * | `adminErase(req)` | POST /admin/erase | required |
  * | `dcaeVerify(bundle)` | POST /dcae/verify | none |
@@ -81,7 +122,8 @@ const RETRYABLE_STATUSES = new Set([429, 502, 503, 504]);
  * | `clearRequestKey()` | DELETE /keys/request-key | required |
  *
  * With the `signingKey` option set, every path to POST /execute carries
- * a fresh request signature. Without it, requests are unsigned.
+ * a fresh request signature, each row of a batch carries its own, and a
+ * determinism check carries one. Without it, requests are unsigned.
  *
  * Idempotent GETs that hit a transient failure (502/503/504/429)
  * are retried with exponential backoff + full jitter. Non-
@@ -124,24 +166,59 @@ export class VerdifaxClient {
     return this.request<VerdifaxVersion>("GET", "/version");
   }
 
+  /** The server's own API description. */
+  async getOpenAPI(): Promise<Record<string, unknown>> {
+    return this.request<Record<string, unknown>>("GET", "/openapi.json");
+  }
+
+  /** Run counts for this API key. */
+  async getStats(): Promise<RunStats> {
+    this.requireAPIKey();
+    return this.request<RunStats>("GET", "/stats");
+  }
+
   // ── Execute / Attest (auth) ───────────────────────────────────
 
   async execute(req: ExecuteRequest): Promise<ExecuteResponse> {
+    this.requireExecuteFields(req);
+    return this.request<ExecuteResponse>("POST", "/execute", this.prepared(req));
+  }
+
+  /** Runs one payload twice on the server and compares the manifest
+   *  hashes. One signature covers the request, and the server claims
+   *  its nonce once. Both runs are recorded. */
+  async verifyDeterminism(
+    req: ExecuteRequest,
+  ): Promise<VerifyDeterminismResponse> {
+    this.requireExecuteFields(req);
+    return this.request<VerifyDeterminismResponse>(
+      "POST",
+      "/execute/verify-determinism",
+      this.prepared(req),
+    );
+  }
+
+  /** Sends up to {@link MAX_BATCH_ROWS} runs in one request. With a
+   *  signing key each row carries its own signature and nonce. A row
+   *  that fails comes back in `results` with `ok: false`, so the call
+   *  does not throw for it. The rows are not checked here: the server
+   *  reports a bad row in that row's result.
+   *
+   *  This is one POST and it is never retried. After a timeout the
+   *  server may have run some or all of the rows. */
+  async executeBatch(runs: ExecuteRequest[]): Promise<ExecuteBatchResponse> {
     this.requireAPIKey();
-    if (!req.payload && !req.payload_text) {
+    if (!Array.isArray(runs) || runs.length === 0) {
+      throw new VerdifaxError("verdifax: executeBatch needs at least one run");
+    }
+    if (runs.length > MAX_BATCH_ROWS) {
       throw new VerdifaxError(
-        "verdifax: ExecuteRequest needs payload or payload_text",
+        `verdifax: executeBatch accepts at most ${MAX_BATCH_ROWS} runs (got ${runs.length})`,
       );
     }
-    if (!req.program_id || !req.route_id || !req.registry_record_hash) {
-      throw new VerdifaxError(
-        "verdifax: program_id, route_id, and registry_record_hash are required",
-      );
-    }
-    const body = this.signingKey
-      ? { ...req, request_signature: signRequest(this.signingKey, req) }
-      : req;
-    return this.request<ExecuteResponse>("POST", "/execute", body);
+    return this.request<ExecuteBatchResponse>("POST", "/execute/batch", {
+      runs: runs.map((run) => this.prepared(run)),
+    });
   }
 
   /** High-level convenience wrapper around `execute()`. Accepts
@@ -170,6 +247,11 @@ export class VerdifaxClient {
       registry_record_hash: req.registry_record_hash,
       ai_output_text: req.ai_output_text,
       attested_context: req.attested_context,
+      reproducibility_context: req.reproducibility_context,
+      request_substance: req.request_substance,
+      authorization_chain: req.authorization_chain,
+      regulatory_scaffolding: req.regulatory_scaffolding,
+      causal_graph: req.causal_graph,
     };
     if (req.payload !== undefined) {
       body.payload = Buffer.isBuffer(req.payload)
@@ -243,6 +325,113 @@ export class VerdifaxClient {
     return { runs: out.runs ?? [], total: out.total ?? 0 };
   }
 
+  /** Searches this key's runs. `manifest_hash` matches a prefix. The
+   *  server ignores a `from` or `to` it cannot parse here, unlike
+   *  {@link exportRuns}, which refuses one. */
+  async searchRuns(params: SearchRunsParams = {}): Promise<{
+    runs: RunSummary[];
+    total: number;
+  }> {
+    this.requireAPIKey();
+    const q = new URLSearchParams();
+    for (const name of [
+      "manifest_hash",
+      "program_id",
+      "route_id",
+      "status",
+      "from",
+      "to",
+    ] as const) {
+      const value = params[name];
+      if (value) q.set(name, value);
+    }
+    if (params.limit && params.limit > 0) {
+      q.set("limit", String(params.limit));
+    }
+    if (params.offset && params.offset > 0) {
+      q.set("offset", String(params.offset));
+    }
+    const qs = q.toString();
+    const path = qs ? `/runs/search?${qs}` : "/runs/search";
+    const out = await this.request<{
+      ok: boolean;
+      runs: RunSummary[];
+      total: number;
+    }>("GET", path);
+    return { runs: out.runs ?? [], total: out.total ?? 0 };
+  }
+
+  /** Lists what the server holds for this key in a period, failures
+   *  included, up to 10,000 rows. `truncated` is true when the period
+   *  holds more. The list states what was stored, not a verdict, and a
+   *  call that never reached Verdifax cannot appear in it. */
+  async exportRuns(params: ExportRunsParams = {}): Promise<RunsExport> {
+    this.requireAPIKey();
+    return this.request<RunsExport>("GET", this.exportPath(params, "json"));
+  }
+
+  /** The same rows as {@link exportRuns}: the raw CSV text with `total`
+   *  and `truncated` from the response headers. Check `truncated`: when
+   *  true, the CSV is missing rows for the period. Throws when the server
+   *  does not send those headers, so that a cut-off export cannot pass
+   *  for a complete one. */
+  async exportRunsCSV(params: ExportRunsParams = {}): Promise<RunsExportCSV> {
+    this.requireAPIKey();
+    const { text, headers } = await this.requestRaw(
+      this.exportPath(params, "csv"),
+    );
+    const total = Number.parseInt(headers.get(HEADER_EXPORT_TOTAL) ?? "", 10);
+    const truncated = headers.get(HEADER_EXPORT_TRUNCATED);
+    if (
+      !Number.isSafeInteger(total) ||
+      (truncated !== "true" && truncated !== "false")
+    ) {
+      throw new VerdifaxError(
+        `verdifax: the server did not report ${HEADER_EXPORT_TOTAL} and ${HEADER_EXPORT_TRUNCATED}, so this CSV may be cut off; use exportRuns instead`,
+      );
+    }
+    return { csv: text, total, truncated: truncated === "true" };
+  }
+
+  private exportPath(params: ExportRunsParams, format: string): string {
+    const q = new URLSearchParams();
+    if (params.from) q.set("from", params.from);
+    if (params.to) q.set("to", params.to);
+    q.set("format", format);
+    return `/runs/export?${q.toString()}`;
+  }
+
+  // ── Attestation receipts (auth) ──────────────────────────────
+
+  async listAttestations(
+    params: ListAttestationsParams = {},
+  ): Promise<AttestationList> {
+    this.requireAPIKey();
+    const q = new URLSearchParams();
+    if (params.limit && params.limit > 0) {
+      q.set("limit", String(params.limit));
+    }
+    if (params.offset && params.offset > 0) {
+      q.set("offset", String(params.offset));
+    }
+    const qs = q.toString();
+    return this.request<AttestationList>(
+      "GET",
+      qs ? `/attestations?${qs}` : "/attestations",
+    );
+  }
+
+  async getAttestation(attestationId: number): Promise<Record<string, unknown>> {
+    this.requireAPIKey();
+    if (attestationId <= 0) {
+      throw new VerdifaxError("verdifax: attestationId must be > 0");
+    }
+    return this.request<Record<string, unknown>>(
+      "GET",
+      `/attestations/${attestationId}`,
+    );
+  }
+
   // ── Sealed-artifact retrieval (auth) ─────────────────────────
 
   async getAllowToken(runId: number): Promise<Record<string, unknown>> {
@@ -263,6 +452,47 @@ export class VerdifaxClient {
 
   async getAivpT4HaltReceipt(runId: number): Promise<Record<string, unknown>> {
     return this.getRunArtifact(runId, "aivp-t4-halt-receipt");
+  }
+
+  async getAttestationGapReceipt(
+    runId: number,
+  ): Promise<Record<string, unknown>> {
+    return this.getRunArtifact(runId, "attestation-gap-receipt");
+  }
+
+  async getCESAuditRecord(runId: number): Promise<Record<string, unknown>> {
+    return this.getRunArtifact(runId, "ces-audit-record");
+  }
+
+  /** The audit report for a run, as JSON. */
+  async getRunReport(runId: number): Promise<Record<string, unknown>> {
+    const out = await this.getRunArtifact(runId, "report");
+    return out.report as Record<string, unknown>;
+  }
+
+  /** The run's sealed audit bundle as the exact JSON text the server
+   *  sent, to save and check with `verdifax-verify`. It is not parsed:
+   *  JSON.parse would round a number above 2^53 and the recomputed hash
+   *  would stop matching. */
+  async getRunArtifacts(runId: number): Promise<string> {
+    this.requireAPIKey();
+    if (runId <= 0) throw new VerdifaxError("verdifax: runId must be > 0");
+    return (await this.requestRaw(`/runs/${runId}/artifacts`)).text;
+  }
+
+  /** The public audit bundle of a record published by run id, as the
+   *  exact JSON text the server sent. Needs no API key. */
+  async getPublicBundle(runId: number): Promise<string> {
+    if (runId <= 0) throw new VerdifaxError("verdifax: runId must be > 0");
+    return (await this.requestRaw(`/runs/${runId}/bundle.json`)).text;
+  }
+
+  /** The public audit bundle a share token points to, as the exact JSON
+   *  text the server sent. Needs no API key. */
+  async getPublicBundleByToken(token: string): Promise<string> {
+    if (!token) throw new VerdifaxError("verdifax: token is required");
+    const path = `/public/runs/${encodeURIComponent(token)}/bundle.json`;
+    return (await this.requestRaw(path)).text;
   }
 
   private async getRunArtifact(
@@ -380,26 +610,30 @@ export class VerdifaxClient {
 
   // ── Provider helpers (Claude / OpenAI) ───────────────────────
 
-  /** Convenience for attesting an Anthropic Claude API response.
-   *  Wires the response text into the AIVP governance pipeline
-   *  by setting `ai_output_text`. */
+  /** Convenience for attesting an Anthropic Claude API response. With
+   *  `govern: true` the response text also goes to the AIVP review as
+   *  `ai_output_text`; that is off by default, so the text leaves your
+   *  machine for review only when you ask. */
   async attestClaudeResponse(args: {
     program_id: Hex64;
     route_id: string;
     registry_record_hash: Hex64;
     prompt: string;
     response: string;
+    govern?: boolean;
   }): Promise<ExecuteResponse> {
     return this.attestProviderResponse({ ...args, provider: "anthropic" });
   }
 
-  /** Convenience for attesting an OpenAI API response. */
+  /** Convenience for attesting an OpenAI API response. `govern` works as
+   *  in {@link attestClaudeResponse}. */
   async attestOpenAIResponse(args: {
     program_id: Hex64;
     route_id: string;
     registry_record_hash: Hex64;
     prompt: string;
     response: string;
+    govern?: boolean;
   }): Promise<ExecuteResponse> {
     return this.attestProviderResponse({ ...args, provider: "openai" });
   }
@@ -411,23 +645,23 @@ export class VerdifaxClient {
     registry_record_hash: Hex64;
     prompt: string;
     response: string;
+    govern?: boolean;
   }): Promise<ExecuteResponse> {
     if (!args.response) {
       throw new VerdifaxError(
         "verdifax: response is required for attestation",
       );
     }
-    const payloadText = JSON.stringify({
-      provider: args.provider,
-      prompt: args.prompt,
-      response: args.response,
-    });
     return this.attest({
-      payload_text: payloadText,
+      payload_text: formatProviderPayload(
+        args.provider,
+        args.prompt,
+        args.response,
+      ),
       program_id: args.program_id,
       route_id: args.route_id,
       registry_record_hash: args.registry_record_hash,
-      ai_output_text: args.response,
+      ai_output_text: args.govern ? args.response : undefined,
       attested_context: {
         actor_role: "ai_assistant",
         model_provider: args.provider,
@@ -441,6 +675,7 @@ export class VerdifaxClient {
     method: string,
     path: string,
     body?: unknown,
+    rawText = false,
   ): Promise<T> {
     const url = this.baseURL + path;
     const headers: Record<string, string> = {
@@ -509,6 +744,7 @@ export class VerdifaxClient {
         }
       }
 
+      if (rawText) return { text, headers: resp.headers } as T;
       if (text.length === 0) return undefined as T;
       try {
         return JSON.parse(text) as T;
@@ -529,7 +765,39 @@ export class VerdifaxClient {
     );
   }
 
+  /** A GET whose body is kept as sent, retried like any other GET. */
+  private requestRaw(path: string): Promise<RawResponse> {
+    return this.request<RawResponse>("GET", path, undefined, true);
+  }
+
   private requireAPIKey(): void {
     if (!this.apiKey) throw new APIKeyRequiredError();
+  }
+
+  private requireExecuteFields(req: ExecuteRequest): void {
+    this.requireAPIKey();
+    if (!req.payload && !req.payload_text) {
+      throw new VerdifaxError(
+        "verdifax: ExecuteRequest needs payload or payload_text",
+      );
+    }
+    if (!req.program_id || !req.route_id || !req.registry_record_hash) {
+      throw new VerdifaxError(
+        "verdifax: program_id, route_id, and registry_record_hash are required",
+      );
+    }
+    validateHex64(req.program_id, "program_id");
+    validateHex64(req.registry_record_hash, "registry_record_hash");
+    validateRouteId(req.route_id);
+    refuseCallerOriginHashes(req.request_substance);
+  }
+
+  /** The request with its derived flags and, with a signing key, a fresh
+   *  signature and nonce, on a copy. */
+  private prepared(req: ExecuteRequest): ExecuteRequest {
+    const body = withExecuteFlags(req);
+    return this.signingKey
+      ? { ...body, request_signature: signRequest(this.signingKey, body) }
+      : body;
   }
 }

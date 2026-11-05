@@ -55,10 +55,46 @@ export interface ExecuteRequest {
   registry_record_hash: Hex64;
   /** When non-empty, opts the request into the AIVP governance pipeline. */
   ai_output_text?: string;
-  /** Caller-attested actor + decision metadata; open schema. */
+  /** Caller-attested actor + decision metadata; open schema. The client
+   *  derives `attested` from whether any other field is provided. */
   attested_context?: Record<string, unknown>;
+  /** Caller-declared runtime fingerprint, recorded in the audit bundle.
+   *  Build it with {@link captureEnvironment}. */
+  reproducibility_context?: ReproducibilityContext;
+  /** Caller-supplied substance of the request: prompt, output, cost,
+   *  latency and origin metadata. Recorded as supplied. Leave out
+   *  `origin.source_ip_hash` and `origin.user_agent_hash`: the server
+   *  computes those and refuses them. */
+  request_substance?: Record<string, unknown>;
+  /** Caller-supplied approval chain. Recorded as supplied, not verified
+   *  by Verdifax. */
+  authorization_chain?: Record<string, unknown>;
+  /** Caller-supplied regulatory metadata. Recorded as supplied, not an
+   *  assessment by Verdifax. */
+  regulatory_scaffolding?: Record<string, unknown>;
+  /** Caller-supplied record of what led to this run. Recorded as
+   *  supplied. */
+  causal_graph?: Record<string, unknown>;
   /** Filled in by the client when the `signingKey` option is set. */
   request_signature?: RequestSignature;
+}
+
+/** The runtime a caller declares for a run. Every field is optional.
+ *  The server records these values as given and does not check them. */
+export interface ReproducibilityContext {
+  /** True when any other field has a value. The client derives this. */
+  declared?: boolean;
+  /** 64 hex characters, without the `sha256:` prefix. */
+  container_image_hash?: string;
+  runtime_name?: string;
+  runtime_version?: string;
+  /** `name==version` strings, sorted. */
+  pinned_dependencies?: string[];
+  git_commit_sha?: string;
+  /** `library=seed` strings, sorted. */
+  random_seeds?: string[];
+  /** GOOS/GOARCH style, for example `linux/amd64`. */
+  platform?: string;
 }
 
 /** The signature an API key with a registered request key must carry.
@@ -101,6 +137,65 @@ export interface ExecuteResponse {
   duration_ms: number;
 }
 
+/** One row of {@link ExecuteBatchResponse}. A successful row has
+ *  `manifest`. A failed row has `error`, and `error_stage` and a typed
+ *  receipt when the pipeline halted. A row refused before it ran has
+ *  no `run_id`. */
+export interface ExecuteBatchResult {
+  index: number;
+  ok: boolean;
+  run_id?: number;
+  manifest_hash?: Hex64;
+  manifest?: ExecutionManifest;
+  error?: string;
+  error_stage?: string;
+  duration_ms: number;
+  partial_manifest?: ExecutionManifest;
+  deny_receipt?: Record<string, unknown>;
+  ccv_halt_receipt?: Record<string, unknown>;
+  macc_halt_receipt?: Record<string, unknown>;
+  aivp_t4_halt_receipt?: Record<string, unknown>;
+  attestation_gap_receipt?: Record<string, unknown>;
+}
+
+/** Body returned by POST /execute/batch. */
+export interface ExecuteBatchResponse {
+  ok: boolean;
+  total: number;
+  successful: number;
+  failed: number;
+  duration_ms: number;
+  results: ExecuteBatchResult[];
+}
+
+/** One of the two runs of a determinism check. */
+export interface DeterminismRun {
+  run_id: number;
+  manifest_hash: string;
+  bundle_hash: string;
+  duration_ms: number;
+  status: string;
+  error?: string;
+}
+
+/** How the two runs of a determinism check compared. */
+export interface DeterminismDiff {
+  differs: boolean;
+  manifest_hash_differs: boolean;
+  bundle_hash_differs: boolean;
+  differing_fields?: string[];
+}
+
+/** Body returned by POST /execute/verify-determinism. `deterministic`
+ *  means both runs ended ok with equal manifest hashes. */
+export interface VerifyDeterminismResponse {
+  ok: boolean;
+  deterministic: boolean;
+  first: DeterminismRun;
+  second: DeterminismRun;
+  diff: DeterminismDiff;
+}
+
 /**
  * Sealed manifest. Field names match the orchestrator's Go-default
  * JSON encoding (CapitalCamelCase).
@@ -137,6 +232,23 @@ export interface ExecutionManifest {
 
 // ── Runs ────────────────────────────────────────────────────────
 
+/** Every status the server gives a run. */
+export const RUN_STATUSES = [
+  "ok",
+  "probe",
+  "pepg_deny",
+  "ccv_halt",
+  "macc_halt",
+  "aivp_t4_halt",
+  "attestation_gap",
+  "stage_error",
+] as const;
+
+/** A run's status: one of {@link RUN_STATUSES}, or a value a newer server
+ *  adds. Written with `string & {}` so editors still offer the known
+ *  values and any string can be compared. */
+export type RunStatus = (typeof RUN_STATUSES)[number] | (string & {});
+
 export interface Run {
   ok: boolean;
   id: number;
@@ -146,7 +258,7 @@ export interface Run {
   route_id: string;
   manifest_hash: Hex64;
   duration_ms: number;
-  status: "ok" | "pepg_deny" | "ccv_halt" | "macc_halt" | "stage_error";
+  status: RunStatus;
   error_stage?: string;
   error_message?: string;
   manifest: ExecutionManifest;
@@ -207,6 +319,11 @@ export interface AttestRequest {
   registry_record_hash: Hex64;
   ai_output_text?: string;
   attested_context?: Record<string, unknown>;
+  reproducibility_context?: ReproducibilityContext;
+  request_substance?: Record<string, unknown>;
+  authorization_chain?: Record<string, unknown>;
+  regulatory_scaffolding?: Record<string, unknown>;
+  causal_graph?: Record<string, unknown>;
 }
 
 /** Optional filters for {@link VerdifaxClient.listRuns}. */
@@ -224,8 +341,102 @@ export interface RunSummary {
   program_id: Hex64;
   route_id: string;
   manifest_hash: Hex64;
-  status: "ok" | "pepg_deny" | "ccv_halt" | "macc_halt" | "stage_error";
+  status: RunStatus;
   outcome_kind?: string;
+  duration_ms?: number;
+  error_stage?: string;
+  execution_region?: string;
+}
+
+/** Optional filters for {@link VerdifaxClient.searchRuns}. `from` and
+ *  `to` are RFC 3339 times. */
+export interface SearchRunsParams {
+  /** Matches manifest hashes that start with this value. */
+  manifest_hash?: string;
+  program_id?: Hex64;
+  route_id?: string;
+  status?: string;
+  from?: string;
+  to?: string;
+  limit?: number;
+  offset?: number;
+}
+
+/** Period for {@link VerdifaxClient.exportRuns} and
+ *  {@link VerdifaxClient.exportRunsCSV}, as RFC 3339 times. `from` is
+ *  inclusive and `to` is exclusive. `to` defaults to the time of the
+ *  request. */
+export interface ExportRunsParams {
+  from?: string;
+  to?: string;
+}
+
+/** One run in an evidence export: what the server stored, not a verdict. */
+export interface ExportRow {
+  run_id: number;
+  created_at: string;
+  status: RunStatus;
+  error_stage: string;
+  route_id: string;
+  manifest_hash: string;
+  log_entry_id: string;
+  leaf_hash: string;
+  complete_record_entry_id: string;
+  complete_record_leaf_hash: string;
+}
+
+/** Body returned by GET /runs/export in JSON form. */
+export interface RunsExport {
+  ok: boolean;
+  /** The upper bound the server used for this export. */
+  to: string;
+  /** Runs held for the period. */
+  total: number;
+  /** Rows in this response. */
+  returned: number;
+  /** True when the period holds more rows than this response. */
+  truncated: boolean;
+  /** Rows returned, counted by status. */
+  by_status: Record<string, number>;
+  runs: ExportRow[];
+}
+
+/** Returned by {@link VerdifaxClient.exportRunsCSV}. */
+export interface RunsExportCSV {
+  /** The CSV text, unparsed. */
+  csv: string;
+  /** Runs held for the period. */
+  total: number;
+  /** True when the period holds more rows than `csv`. */
+  truncated: boolean;
+}
+
+/** Optional paging for {@link VerdifaxClient.listAttestations}. */
+export interface ListAttestationsParams {
+  limit?: number;
+  offset?: number;
+}
+
+/** Body returned by GET /attestations. Each row is a receipt as the
+ *  server sends it, without its inclusion proof. */
+export interface AttestationList {
+  ok: boolean;
+  count: number;
+  limit: number;
+  offset: number;
+  attestations: Record<string, unknown>[];
+}
+
+/** Body returned by GET /stats. */
+export interface RunStats {
+  ok: boolean;
+  total_runs: number;
+  runs_today: number;
+  runs_last_24h: number;
+  pass_rate: number;
+  avg_duration_ms: number;
+  last_run_at: string;
+  runs_by_program: Record<string, number>;
 }
 
 /** Audit-PDF format selector. */
