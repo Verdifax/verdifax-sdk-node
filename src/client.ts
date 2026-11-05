@@ -5,6 +5,11 @@ import {
   NotFoundError,
   VerdifaxError,
 } from "./errors.js";
+import {
+  loadSigningKey,
+  requestKeyRegistrationBody,
+  signRequest,
+} from "./signing.js";
 import type {
   AdminAPIKey,
   AdminCreateKeyResponse,
@@ -20,6 +25,7 @@ import type {
   Hex64,
   ListRunsParams,
   PDFFormat,
+  RequestKeyRegistration,
   Run,
   RunSummary,
   VerdifaxVersion,
@@ -27,6 +33,7 @@ import type {
 } from "./types.js";
 import { validateHex64, validateRouteId } from "./validation.js";
 import { SDK_VERSION } from "./version.js";
+import type { KeyObject } from "node:crypto";
 
 const DEFAULT_BASE_URL = "https://api.verdifax.com";
 // A successful run makes two public-log entries and, when AI output is sent, an
@@ -38,6 +45,7 @@ const DEFAULT_MAX_RETRIES = 3;
 const DEFAULT_RETRY_BASE_DELAY_MS = 200;
 const SDK_USER_AGENT = `verdifax-sdk-node/${SDK_VERSION}`;
 const HEADER_API_KEY = "X-Verdifax-Key";
+const REQUEST_KEY_PATH = "/keys/request-key";
 
 const RETRYABLE_STATUSES = new Set([429, 502, 503, 504]);
 
@@ -69,6 +77,11 @@ const RETRYABLE_STATUSES = new Set([429, 502, 503, 504]);
  * | `adminRevokeKey(id)` | DELETE /admin/keys/{id} | required |
  * | `attestClaudeResponse(...)` | POST /execute (helper) | required |
  * | `attestOpenAIResponse(...)` | POST /execute (helper) | required |
+ * | `registerRequestKey()` | POST /keys/request-key | required |
+ * | `clearRequestKey()` | DELETE /keys/request-key | required |
+ *
+ * With the `signingKey` option set, every path to POST /execute carries
+ * a fresh request signature. Without it, requests are unsigned.
  *
  * Idempotent GETs that hit a transient failure (502/503/504/429)
  * are retried with exponential backoff + full jitter. Non-
@@ -82,6 +95,7 @@ export class VerdifaxClient {
   private readonly userAgent: string;
   private readonly maxRetries: number;
   private readonly retryBaseDelayMs: number;
+  private readonly signingKey: KeyObject | undefined;
 
   constructor(config: ClientConfig = {}) {
     this.baseURL = (config.baseURL ?? DEFAULT_BASE_URL).replace(/\/$/, "");
@@ -94,6 +108,10 @@ export class VerdifaxClient {
         : Math.max(0, config.maxRetries);
     this.retryBaseDelayMs =
       config.retryBaseDelayMs ?? DEFAULT_RETRY_BASE_DELAY_MS;
+    this.signingKey =
+      config.signingKey === undefined
+        ? undefined
+        : loadSigningKey(config.signingKey);
   }
 
   // ── Health + Version (anonymous) ──────────────────────────────
@@ -120,7 +138,10 @@ export class VerdifaxClient {
         "verdifax: program_id, route_id, and registry_record_hash are required",
       );
     }
-    return this.request<ExecuteResponse>("POST", "/execute", req);
+    const body = this.signingKey
+      ? { ...req, request_signature: signRequest(this.signingKey, req) }
+      : req;
+    return this.request<ExecuteResponse>("POST", "/execute", body);
   }
 
   /** High-level convenience wrapper around `execute()`. Accepts
@@ -158,6 +179,32 @@ export class VerdifaxClient {
       body.payload_text = req.payload_text!;
     }
     return this.execute(body);
+  }
+
+  // ── Request signing (auth) ───────────────────────────────────
+
+  /** Registers this client's public key on its API key, with the proof
+   *  that the client holds the private key. From then on the server
+   *  refuses a run on this API key without a request signature. */
+  async registerRequestKey(): Promise<RequestKeyRegistration> {
+    this.requireAPIKey();
+    if (!this.signingKey) {
+      throw new VerdifaxError(
+        "verdifax: registerRequestKey needs the signingKey client option",
+      );
+    }
+    return this.request<RequestKeyRegistration>(
+      "POST",
+      REQUEST_KEY_PATH,
+      requestKeyRegistrationBody(this.signingKey),
+    );
+  }
+
+  /** Clears the registered public key, so the server stops requiring
+   *  request signatures on this API key. */
+  async clearRequestKey(): Promise<void> {
+    this.requireAPIKey();
+    await this.request<void>("DELETE", REQUEST_KEY_PATH);
   }
 
   // ── Runs ──────────────────────────────────────────────────────

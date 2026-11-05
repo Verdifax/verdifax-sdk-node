@@ -57,6 +57,41 @@ export interface ExecuteRequest {
   ai_output_text?: string;
   /** Caller-attested actor + decision metadata; open schema. */
   attested_context?: Record<string, unknown>;
+  /** Filled in by the client when the `signingKey` option is set. */
+  request_signature?: RequestSignature;
+}
+
+/** The signature an API key with a registered request key must carry.
+ *  The public key comes from the registration, never from the request. */
+export interface RequestSignature {
+  /** Base64 Ed25519 signature. */
+  signature: string;
+  /** RFC 3339 UTC with whole seconds, for example 2026-11-05T02:18:00Z. */
+  signed_at: string;
+  /** 16 random bytes as 32 lowercase hex characters, fresh per request. */
+  nonce: string;
+}
+
+/** A key pair from {@link generateRequestKeyPair}, as raw bytes. */
+export interface RequestKeyPair {
+  /** The 32-byte Ed25519 public key. */
+  publicKey: Buffer;
+  /** The 32-byte Ed25519 private key. Keep it secret. */
+  privateKey: Buffer;
+}
+
+/** Body of POST /keys/request-key. */
+export interface RequestKeyRegistrationBody {
+  /** Base64 of the raw 32-byte public key. */
+  public_key: string;
+  /** Base64 signature proving the caller holds the private key. */
+  proof: string;
+}
+
+/** Returned by {@link VerdifaxClient.registerRequestKey}. */
+export interface RequestKeyRegistration {
+  ok: boolean;
+  public_key: string;
 }
 
 export interface ExecuteResponse {
@@ -150,6 +185,10 @@ export interface ClientConfig {
    *  it on each subsequent retry (exponential backoff with full
    *  jitter). Defaults to 200ms. */
   retryBaseDelayMs?: number;
+  /** The 32 raw bytes of an Ed25519 private key. When set, every path to
+   *  POST /execute signs its request. The key is never sent to the
+   *  server. Leave unset for unsigned requests. */
+  signingKey?: Uint8Array;
 }
 
 // ── Higher-level helpers + extended endpoints ─────────────────

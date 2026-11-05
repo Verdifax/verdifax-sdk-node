@@ -52,6 +52,8 @@ if (v.verified) {
 | `client.execute(req)` | `POST /execute` | required |
 | `client.getRun(id)` | `GET /runs/{id}` | required |
 | `client.verifyRun(id)` | `GET /runs/{id}/verify` | required |
+| `client.registerRequestKey()` | `POST /keys/request-key` | required |
+| `client.clearRequestKey()` | `DELETE /keys/request-key` | required |
 
 The full HTTP surface (every endpoint, deletion-receipt list,
 DCAE verify, admin endpoints) is documented in the
@@ -95,6 +97,40 @@ try {
   }
 }
 ```
+
+## Request signing
+
+Request signing is optional. A client with no signing key sends the same requests as before.
+
+You can register an Ed25519 public key on your API key, so that each run must also be signed with a private key that only you hold. The key pair is created on your machine, and Verdifax receives only the public key.
+
+```typescript
+import { VerdifaxClient, generateRequestKeyPair } from "verdifax";
+
+// Run once, then store privateKey as a secret.
+const { privateKey } = generateRequestKeyPair();
+
+const client = new VerdifaxClient({
+  apiKey: process.env.VERDIFAX_API_KEY!,
+  signingKey: privateKey, // the 32 raw bytes, as a Buffer or Uint8Array
+});
+
+await client.registerRequestKey(); // sends the public key with its proof
+
+// execute, attest, attestClaudeResponse and attestOpenAIResponse now sign.
+await client.execute({
+  program_id: "1111111111111111111111111111111111111111111111111111111111111111",
+  route_id: "demo-attestation",
+  registry_record_hash: "2222222222222222222222222222222222222222222222222222222222222222",
+  payload_text: "first signed attestation",
+});
+
+await client.clearRequestKey(); // stops requiring signatures on this API key
+```
+
+Registering a key changes that API key for every client that uses it: the server then refuses a run without a valid signature, so every caller on the key needs the private key. Each request carries the time and a fresh random nonce. The server refuses a repeated nonce and a time more than five minutes from its own clock.
+
+The signature shows the holder of the key requested the run. It does not show the key holder accepted the outcome.
 
 ## Trust model
 

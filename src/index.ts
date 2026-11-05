@@ -11,6 +11,12 @@
 
 export { VerdifaxClient } from "./client.js";
 export { fromEnv } from "./config.js";
+export {
+  generateRequestKeyPair,
+  requestKeyRegistrationBody,
+  requestSignaturePreimage,
+  signRequest,
+} from "./signing.js";
 export { validateHex64, validateRouteId } from "./validation.js";
 
 export {
@@ -38,6 +44,10 @@ export type {
   Hex64,
   ListRunsParams,
   PDFFormat,
+  RequestKeyPair,
+  RequestKeyRegistration,
+  RequestKeyRegistrationBody,
+  RequestSignature,
   Run,
   RunSummary,
   VerdifaxVersion,
