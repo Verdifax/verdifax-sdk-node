@@ -10,6 +10,7 @@
  */
 
 export { MAX_BATCH_ROWS, VerdifaxClient } from "./client.js";
+export { VerdifaxJob } from "./job.js";
 export { fromEnv } from "./config.js";
 export { captureEnvironment } from "./environment.js";
 export { formatProviderPayload } from "./helpers.js";
@@ -25,11 +26,19 @@ export {
 } from "./section0.js";
 export {
   generateRequestKeyPair,
+  requestKeyChangeApproval,
+  requestKeyChangePreimage,
   requestKeyRegistrationBody,
   requestSignaturePreimage,
+  requestSignaturePreimageV2,
   signRequest,
+  signRequestV2,
 } from "./signing.js";
-export { validateHex64, validateRouteId } from "./validation.js";
+export {
+  validateHex64,
+  validateJobName,
+  validateRouteId,
+} from "./validation.js";
 
 export {
   APIError,
@@ -61,13 +70,17 @@ export type {
   FormulaEra,
   Health,
   Hex64,
+  JobLink,
+  JobStepOptions,
   ListAttestationsParams,
   ListRunsParams,
   PDFFormat,
+  RequestKeyChange,
   RequestKeyPair,
   RequestKeyRegistration,
   RequestKeyRegistrationBody,
   RequestSignature,
+  RequestSignatureV2,
   ReproducibilityContext,
   Run,
   RunsExport,
@@ -76,6 +89,7 @@ export type {
   RunStatus,
   RunSummary,
   SearchRunsParams,
+  SignedRequestBody,
   VerdifaxVersion,
   VerifyDeterminismResponse,
   VerifyResponse,

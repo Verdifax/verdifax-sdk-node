@@ -2,7 +2,6 @@
 // server listens on localhost only; nothing leaves this machine.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import crypto from "node:crypto";
 import http from "node:http";
 
 import {
@@ -14,6 +13,7 @@ import {
   VerdifaxClient,
   VerdifaxError,
 } from "../dist/index.mjs";
+import { signedFields, verifiesV2 } from "./signed-body.mjs";
 
 const SEED = Buffer.alloc(32, 1);
 const PUBLIC_KEY = "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w=";
@@ -26,27 +26,7 @@ const ROW = {
 const CSV = "run_id,created_at,status\n1,2026-11-05T00:00:00Z,ok\n";
 
 function verifies(body) {
-  const header = Buffer.from("302a300506032b6570032100", "hex");
-  const key = crypto.createPublicKey({
-    key: Buffer.concat([header, Buffer.from(PUBLIC_KEY, "base64")]),
-    format: "der",
-    type: "spki",
-  });
-  const hash = crypto
-    .createHash("sha256")
-    .update(Buffer.from(body.payload_text, "utf8"))
-    .digest("hex");
-  const { signature, signed_at, nonce } = body.request_signature;
-  const signed = [
-    "verdifax.request.v1",
-    hash,
-    body.program_id,
-    body.route_id,
-    body.registry_record_hash,
-    signed_at,
-    nonce,
-  ].join("\0");
-  return crypto.verify(null, Buffer.from(signed, "utf8"), key, Buffer.from(signature, "base64"));
+  return verifiesV2(body, Buffer.from(PUBLIC_KEY, "base64"));
 }
 
 async function withServer(respond, run, config = {}) {

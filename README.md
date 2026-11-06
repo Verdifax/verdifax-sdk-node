@@ -80,13 +80,17 @@ if (v.verified) {
 | `client.getPublicBundleByToken(token)` | `GET /public/runs/{token}/bundle.json` | none |
 | `client.dcaeVerify(bundle)` | `POST /dcae/verify` | none |
 | `client.registerRequestKey()` | `POST /keys/request-key` | required |
+| `client.rotateRequestKey(newSigningKey)` | `POST /keys/request-key` | required |
 | `client.clearRequestKey()` | `DELETE /keys/request-key` | required |
 | `client.adminCreateKey(name)` | `POST /admin/keys` | admin |
 | `client.adminListKeys()` | `GET /admin/keys` | admin |
 | `client.adminRevokeKey(id)` | `DELETE /admin/keys/{id}` | admin |
+| `client.adminClearRequestKey(id)` | `DELETE /admin/keys/{id}/request-key` | admin |
 | `client.adminErase(req)` | `POST /admin/erase` | admin |
 
-These functions make no request: `captureEnvironment`, `formatProviderPayload`, `signRequest`, `requestKeyRegistrationBody`, `requestSignaturePreimage`, `generateRequestKeyPair`, `validateHex64`, `validateRouteId`, `dseDispatchHash`, `dcaeClosureHash` and `cresReceiptHash`. `RUN_STATUSES` lists every run status the server uses.
+`client.job(jobId)` returns a [job helper](#jobs) and makes no request until a step runs.
+
+These functions make no request: `captureEnvironment`, `formatProviderPayload`, `signRequest`, `signRequestV2`, `requestKeyRegistrationBody`, `requestKeyChangeApproval`, `requestKeyChangePreimage`, `requestSignaturePreimage`, `requestSignaturePreimageV2`, `generateRequestKeyPair`, `validateHex64`, `validateJobName`, `validateRouteId`, `dseDispatchHash`, `dcaeClosureHash` and `cresReceiptHash`. `RUN_STATUSES` lists every run status the server uses.
 
 `getRunArtifacts`, `getPublicBundle` and `getPublicBundleByToken` return the exact JSON text the server sent, so you can save it and check it with `verdifax-verify`.
 
@@ -126,6 +130,44 @@ for (const row of batch.results) {
 
 The client's timeout covers the whole batch, so raise `timeoutMs` for a large one. A batch is one POST and it is never retried. After a timeout the server may have run some or all of the rows, so list your runs before you send them again.
 
+## Jobs
+
+A job links several runs into one map: each step names the records it directly follows, so work can split into branches and join again. `client.job(jobId)` returns a helper that keeps the map for you.
+
+```typescript
+const job = client.job("loan-1042");
+const run = { program_id, route_id, registry_record_hash };
+
+await job.step("intake", { ...run, payload_text: "application received" });
+
+// Two branches after one step.
+await job.step("credit", { ...run, payload_text: "credit check", after: ["intake"] });
+await job.step("income", { ...run, payload_text: "income check", after: ["intake"] });
+
+// A final step joining them.
+await job.step("decide", {
+  ...run,
+  payload_text: "decision",
+  after: ["credit", "income"],
+  final: true,
+});
+
+console.log(job.recordHashes); // step id to record hash
+console.log(job.signedRequests); // step id to signed text, when the client signs
+```
+
+`job.step(stepId, options)` takes everything `attest` takes, plus `after`, `external_previous` and `final`, and returns what `attest` returns. `after` lists step ids in this job. Without it, a step follows the one run just before it through this helper, and the first step follows nothing. An `after` that names an unknown step throws a `VerdifaxError` before anything is sent.
+
+A refused or halted step stays in the map, so a later step can follow it. `job.step` records its hash and signed text, then throws the same `APIError` that `attest` throws, with the hash in `err.recordHash`. A step that sealed nothing, such as a timeout or a 409, is not in the map and does not move the default `after`, so it can run again under the same id. To run branches at the same time, give each one its `after`. An empty `after` starts another root step.
+
+A successful step records `record_hash`, or `manifest_hash` if the response has no `record_hash`. If it has neither, `job.step` throws a `VerdifaxError`, so the map never silently gets a gap. A mistyped option such as `afer` is refused before sending, so a typo cannot silently drop a link.
+
+`execute`, `attest` and each row of `executeBatch` also take a `job` block directly: `{ job_id, step_id, previous_record_hashes, external_previous, final }`. Results carry `record_hash`. `job_id` and `step_id` are 1 to 128 letters, digits, `.`, `_`, `:` or `-`, and any other name is refused before sending. The SDK sorts both lists and removes repeats, and refuses unknown fields, a `final` that is not true or false, and hash lists that are not lists. A determinism check runs twice, so `verifyDeterminism` refuses a job.
+
+The server refuses a step in a closed job, a repeated step id, and a final step that leaves a branch with no step after it. To check a whole job, save each record in one folder and run `verdifax-verify --job FOLDER`.
+
+A job map covers what was sent. It cannot show a step that was never sent.
+
 ## Evidence export
 
 `exportRuns` lists the runs the server holds for your key in a period, failures included, with up to 10,000 rows per export. `exportRunsCSV` returns the same rows as raw CSV text.
@@ -141,6 +183,8 @@ if (truncated) {
   console.log(`The CSV holds part of ${total} runs. Use a narrower period.`);
 }
 ```
+
+Pass `job_id` in the period to export one job. JSON rows also carry `anchor_source` (`bundle`, `receipt` or `none`), and `job_id` and `step_id` when the run is a job step.
 
 The export states what the server stored, not a verdict. A call that never reached Verdifax cannot appear in it. Both forms say when a period holds more rows than the export returned: check `truncated`. `exportRunsCSV` reads `total` and `truncated` from the `X-Verdifax-Total` and `X-Verdifax-Truncated` response headers, and throws if the server does not send them. In the CSV, a `route_id` that a spreadsheet could read as a formula gets a leading `'`.
 
@@ -158,6 +202,8 @@ await client.attestClaudeResponse({
   govern: true,
 });
 ```
+
+Both helpers take the same optional `job` block as `attest` and return `record_hash` and `signed_request` the same way.
 
 `govern` is false by default, which changes earlier behavior. Set `govern: true` to also send the response text as `ai_output_text` for the AIVP review, which runs on Anthropic in production. Without it, the AI output text is not sent for review.
 
@@ -219,6 +265,7 @@ Request signing is optional. A client with no signing key sends the same request
 You can register an Ed25519 public key on your API key, so that each run must also be signed with a private key that only you hold. The key pair is created on your machine, and Verdifax receives only the public key.
 
 ```typescript
+import { writeFileSync } from "node:fs";
 import { VerdifaxClient, generateRequestKeyPair } from "verdifax";
 
 // Run once, then store privateKey as a secret.
@@ -233,21 +280,29 @@ await client.registerRequestKey(); // sends the public key with its proof
 
 // execute, attest, attestClaudeResponse, attestOpenAIResponse, executeBatch
 // and verifyDeterminism now sign.
-await client.execute({
+const run = await client.execute({
   program_id: "1111111111111111111111111111111111111111111111111111111111111111",
   route_id: "demo-attestation",
   registry_record_hash: "2222222222222222222222222222222222222222222222222222222222222222",
   payload_text: "first signed attestation",
 });
 
-await client.clearRequestKey(); // stops requiring signatures on this API key
+// The exact text that was signed. Keep it for verdifax-verify --request FILE.
+writeFileSync("signed-request.json", run.signed_request!);
+
+// The current key approves the change, and this client then signs with the new key.
+await client.rotateRequestKey(generateRequestKeyPair().privateKey);
+
+await client.clearRequestKey(); // stops requiring signatures, and this client stops signing
 ```
 
-Registering a key changes that API key for every client that uses it: the server then refuses a run without a valid signature, so every caller on the key needs the private key. Each request carries the time and a fresh random nonce. The server refuses a repeated nonce and a time more than five minutes from its own clock.
+A signed call serializes the request once and signs that exact text, using signature version 2, so the signature covers the whole request. It sends `signed_request` and `request_signature` and nothing else, and a batch row has the same shape. The result carries the text as `signed_request`, on each row for a batch. A refused or halted run throws the usual `APIError`, with the text in `err.signedRequest`. It holds your payload, so it stays out of the error message and logging the error does not print it: read it by name.
+
+Registering a key changes that API key for every client that uses it: the server then refuses a run without a valid signature, so every caller on the key needs the private key. An API key alone cannot replace or clear a registered key: `rotateRequestKey` and `clearRequestKey` send the current key's approval. After a successful `clearRequestKey` the client drops its signing key and sends unsigned requests, because the server refuses a signed run on an API key with no registered key. To sign again, create a client with a `signingKey` and register it. Each request carries the time and a fresh random nonce. The server refuses a repeated nonce and a time more than five minutes from its own clock.
 
 In a batch each row carries its own signature and nonce, and the server checks them as it reaches that row. A row refused for its signature comes back in `results`, so a repeated batch returns HTTP 200 with failed rows, and a row reached more than five minutes after it was signed fails the same way. A determinism check uses one signature for the request, and repeating it returns HTTP 403.
 
-The signature shows the holder of the key requested the run. It does not show the key holder accepted the outcome.
+A signature shows who requested the run, not that they accepted the outcome.
 
 ## Trust model
 

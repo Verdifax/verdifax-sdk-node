@@ -47,3 +47,13 @@ export function validateRouteId(value: string): void {
     );
   }
 }
+
+/** Throws unless `value` is a job or step name: 1 to 128 letters, digits,
+ *  dots, underscores, colons or dashes, the server's own rule. */
+export function validateJobName(value: string, fieldName: string): void {
+  if (typeof value !== "string" || !/^[A-Za-z0-9._:-]{1,128}$/.test(value)) {
+    throw new VerdifaxError(
+      `verdifax: ${fieldName} must be 1 to 128 letters, digits, dots, underscores, colons or dashes`,
+    );
+  }
+}

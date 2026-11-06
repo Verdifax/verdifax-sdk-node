@@ -7,14 +7,16 @@ import {
 } from "./errors.js";
 import {
   loadSigningKey,
+  requestKeyChangeApproval,
   requestKeyRegistrationBody,
-  signRequest,
+  signRequestV2,
 } from "./signing.js";
 import {
   formatProviderPayload,
   refuseCallerOriginHashes,
   withExecuteFlags,
 } from "./helpers.js";
+import { VerdifaxJob } from "./job.js";
 import type {
   AdminAPIKey,
   AdminCreateKeyResponse,
@@ -31,6 +33,7 @@ import type {
   ExportRunsParams,
   Health,
   Hex64,
+  JobLink,
   ListAttestationsParams,
   ListRunsParams,
   PDFFormat,
@@ -41,6 +44,7 @@ import type {
   RunStats,
   RunSummary,
   SearchRunsParams,
+  SignedRequestBody,
   VerdifaxVersion,
   VerifyDeterminismResponse,
   VerifyResponse,
@@ -116,14 +120,19 @@ interface RawResponse {
  * | `adminCreateKey(name)` | POST /admin/keys | required |
  * | `adminListKeys()` | GET /admin/keys | required |
  * | `adminRevokeKey(id)` | DELETE /admin/keys/{id} | required |
+ * | `adminClearRequestKey(id)` | DELETE /admin/keys/{id}/request-key | required |
  * | `attestClaudeResponse(...)` | POST /execute (helper) | required |
  * | `attestOpenAIResponse(...)` | POST /execute (helper) | required |
  * | `registerRequestKey()` | POST /keys/request-key | required |
+ * | `rotateRequestKey(newSigningKey)` | POST /keys/request-key | required |
  * | `clearRequestKey()` | DELETE /keys/request-key | required |
+ * | `job(jobId)` | none, returns a {@link VerdifaxJob} | none |
  *
  * With the `signingKey` option set, every path to POST /execute carries
  * a fresh request signature, each row of a batch carries its own, and a
- * determinism check carries one. Without it, requests are unsigned.
+ * determinism check carries one. Each sends `signed_request` and
+ * `request_signature` and nothing else, and the result carries the signed
+ * text as `signed_request`. Without it, requests are unsigned.
  *
  * Idempotent GETs that hit a transient failure (502/503/504/429)
  * are retried with exponential backoff + full jitter. Non-
@@ -137,7 +146,7 @@ export class VerdifaxClient {
   private readonly userAgent: string;
   private readonly maxRetries: number;
   private readonly retryBaseDelayMs: number;
-  private readonly signingKey: KeyObject | undefined;
+  private signingKey: KeyObject | undefined;
 
   constructor(config: ClientConfig = {}) {
     this.baseURL = (config.baseURL ?? DEFAULT_BASE_URL).replace(/\/$/, "");
@@ -181,28 +190,39 @@ export class VerdifaxClient {
 
   async execute(req: ExecuteRequest): Promise<ExecuteResponse> {
     this.requireExecuteFields(req);
-    return this.request<ExecuteResponse>("POST", "/execute", this.prepared(req));
+    const sent = this.prepared(req);
+    const out = await this.request<ExecuteResponse>("POST", "/execute", sent);
+    return withSignedText(out, sent);
   }
 
   /** Runs one payload twice on the server and compares the manifest
    *  hashes. One signature covers the request, and the server claims
-   *  its nonce once. Both runs are recorded. */
+   *  its nonce once. Both runs are recorded. A run that happens twice
+   *  cannot be one job step, so a `job` is refused here. */
   async verifyDeterminism(
     req: ExecuteRequest,
   ): Promise<VerifyDeterminismResponse> {
     this.requireExecuteFields(req);
-    return this.request<VerifyDeterminismResponse>(
+    if (req.job !== undefined && req.job !== null) {
+      throw new VerdifaxError(
+        "verdifax: a determinism check runs twice, so it cannot be a job step",
+      );
+    }
+    const sent = this.prepared(req);
+    const out = await this.request<VerifyDeterminismResponse>(
       "POST",
       "/execute/verify-determinism",
-      this.prepared(req),
+      sent,
     );
+    return withSignedText(out, sent);
   }
 
   /** Sends up to {@link MAX_BATCH_ROWS} runs in one request. With a
    *  signing key each row carries its own signature and nonce. A row
    *  that fails comes back in `results` with `ok: false`, so the call
-   *  does not throw for it. The rows are not checked here: the server
-   *  reports a bad row in that row's result.
+   *  does not throw for it. The rows are not checked here, except a job
+   *  block, which is refused before anything is sent: the server reports
+   *  any other bad row in that row's result.
    *
    *  This is one POST and it is never retried. After a timeout the
    *  server may have run some or all of the rows. */
@@ -216,9 +236,19 @@ export class VerdifaxClient {
         `verdifax: executeBatch accepts at most ${MAX_BATCH_ROWS} runs (got ${runs.length})`,
       );
     }
-    return this.request<ExecuteBatchResponse>("POST", "/execute/batch", {
-      runs: runs.map((run) => this.prepared(run)),
-    });
+    const sent = runs.map((run) => this.prepared(run));
+    const out = await this.request<ExecuteBatchResponse>(
+      "POST",
+      "/execute/batch",
+      { runs: sent },
+    );
+    if (!Array.isArray(out?.results)) return out;
+    return {
+      ...out,
+      results: out.results.map((row, i) =>
+        i < sent.length ? withSignedText(row, sent[i]!) : row,
+      ),
+    };
   }
 
   /** High-level convenience wrapper around `execute()`. Accepts
@@ -252,6 +282,7 @@ export class VerdifaxClient {
       authorization_chain: req.authorization_chain,
       regulatory_scaffolding: req.regulatory_scaffolding,
       causal_graph: req.causal_graph,
+      job: req.job,
     };
     if (req.payload !== undefined) {
       body.payload = Buffer.isBuffer(req.payload)
@@ -261,6 +292,13 @@ export class VerdifaxClient {
       body.payload_text = req.payload_text!;
     }
     return this.execute(body);
+  }
+
+  /** A helper that runs the steps of one job through {@link attest} and
+   *  keeps each step's record hash, so a later step can name it. It makes
+   *  no request until a step runs. */
+  job(jobId: string): VerdifaxJob {
+    return new VerdifaxJob(this, jobId);
   }
 
   // ── Request signing (auth) ───────────────────────────────────
@@ -282,11 +320,53 @@ export class VerdifaxClient {
     );
   }
 
+  /** Replaces the registered key with `newSigningKey`. The new key proves
+   *  itself and this client's current key approves the change. After
+   *  success this client signs with the new key. If the call fails it
+   *  keeps the current key, including after a timeout, when the server may
+   *  have made the change. */
+  async rotateRequestKey(
+    newSigningKey: Uint8Array | KeyObject,
+  ): Promise<RequestKeyRegistration> {
+    this.requireAPIKey();
+    if (!this.signingKey) {
+      throw new VerdifaxError(
+        "verdifax: rotateRequestKey needs the current key in the signingKey client option",
+      );
+    }
+    const next = loadSigningKey(newSigningKey);
+    const registration = requestKeyRegistrationBody(next);
+    const out = await this.request<RequestKeyRegistration>(
+      "POST",
+      REQUEST_KEY_PATH,
+      {
+        ...registration,
+        change: requestKeyChangeApproval(
+          this.signingKey,
+          registration.public_key,
+        ),
+      },
+    );
+    this.signingKey = next;
+    return out;
+  }
+
   /** Clears the registered public key, so the server stops requiring
-   *  request signatures on this API key. */
+   *  request signatures on this API key. With a signing key the client
+   *  sends that key's approval, which the server requires while a key is
+   *  registered. After success the client drops its signing key and sends
+   *  unsigned requests, because the server refuses a signed run on an API
+   *  key with no registered key. If the call fails it keeps the key. */
   async clearRequestKey(): Promise<void> {
     this.requireAPIKey();
-    await this.request<void>("DELETE", REQUEST_KEY_PATH);
+    await this.request<void>(
+      "DELETE",
+      REQUEST_KEY_PATH,
+      this.signingKey
+        ? { change: requestKeyChangeApproval(this.signingKey, "") }
+        : undefined,
+    );
+    this.signingKey = undefined;
   }
 
   // ── Runs ──────────────────────────────────────────────────────
@@ -397,6 +477,7 @@ export class VerdifaxClient {
     const q = new URLSearchParams();
     if (params.from) q.set("from", params.from);
     if (params.to) q.set("to", params.to);
+    if (params.job_id) q.set("job_id", params.job_id);
     q.set("format", format);
     return `/runs/export?${q.toString()}`;
   }
@@ -608,6 +689,17 @@ export class VerdifaxClient {
     await this.request<void>("DELETE", `/admin/keys/${keyId}`);
   }
 
+  /** Clears the request key on an API key whose holder lost it, after a
+   *  manual check. It is the one way to clear a key without that key. The
+   *  id can be any API key, so this client keeps its own signing key. */
+  async adminClearRequestKey(keyId: number): Promise<void> {
+    this.requireAPIKey();
+    if (keyId <= 0) {
+      throw new VerdifaxError("verdifax: keyId must be > 0");
+    }
+    await this.request<void>("DELETE", `/admin/keys/${keyId}/request-key`);
+  }
+
   // ── Provider helpers (Claude / OpenAI) ───────────────────────
 
   /** Convenience for attesting an Anthropic Claude API response. With
@@ -621,6 +713,7 @@ export class VerdifaxClient {
     prompt: string;
     response: string;
     govern?: boolean;
+    job?: JobLink;
   }): Promise<ExecuteResponse> {
     return this.attestProviderResponse({ ...args, provider: "anthropic" });
   }
@@ -634,6 +727,7 @@ export class VerdifaxClient {
     prompt: string;
     response: string;
     govern?: boolean;
+    job?: JobLink;
   }): Promise<ExecuteResponse> {
     return this.attestProviderResponse({ ...args, provider: "openai" });
   }
@@ -646,6 +740,7 @@ export class VerdifaxClient {
     prompt: string;
     response: string;
     govern?: boolean;
+    job?: JobLink;
   }): Promise<ExecuteResponse> {
     if (!args.response) {
       throw new VerdifaxError(
@@ -666,6 +761,7 @@ export class VerdifaxClient {
         actor_role: "ai_assistant",
         model_provider: args.provider,
       },
+      job: args.job,
     });
   }
 
@@ -728,9 +824,16 @@ export class VerdifaxClient {
           continue;
         }
         let errMessage = text.trim();
+        let recordHash: string | undefined;
         try {
-          const env = JSON.parse(text) as { error?: string };
+          const env = JSON.parse(text) as {
+            error?: string;
+            record_hash?: unknown;
+          };
           if (env.error) errMessage = env.error;
+          if (typeof env.record_hash === "string" && env.record_hash) {
+            recordHash = env.record_hash;
+          }
         } catch {
           /* fall through to raw text */
         }
@@ -740,7 +843,13 @@ export class VerdifaxClient {
           case 404:
             throw new NotFoundError(path, errMessage);
           default:
-            throw new APIError(resp.status, path, errMessage);
+            throw new APIError(
+              resp.status,
+              path,
+              errMessage,
+              recordHash,
+              (body as Partial<SignedRequestBody> | undefined)?.signed_request,
+            );
         }
       }
 
@@ -792,12 +901,21 @@ export class VerdifaxClient {
     refuseCallerOriginHashes(req.request_substance);
   }
 
-  /** The request with its derived flags and, with a signing key, a fresh
-   *  signature and nonce, on a copy. */
-  private prepared(req: ExecuteRequest): ExecuteRequest {
-    const body = withExecuteFlags(req);
+  /** The body to send, on a copy: the request with its derived flags or,
+   *  with a signing key, the signed text with a fresh signature and nonce. */
+  private prepared(req: ExecuteRequest): ExecuteRequest | SignedRequestBody {
     return this.signingKey
-      ? { ...body, request_signature: signRequest(this.signingKey, body) }
-      : body;
+      ? signRequestV2(this.signingKey, req)
+      : withExecuteFlags(req);
   }
+}
+
+/** The result with the text that was signed, when the call was signed. */
+function withSignedText<T>(
+  result: T,
+  sent: ExecuteRequest | SignedRequestBody,
+): T {
+  return "signed_request" in sent
+    ? { ...result, signed_request: sent.signed_request }
+    : result;
 }

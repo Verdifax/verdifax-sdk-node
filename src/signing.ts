@@ -18,15 +18,23 @@ import {
 } from "node:crypto";
 
 import { VerdifaxError } from "./errors.js";
+import { withExecuteFlags } from "./helpers.js";
 import type {
   ExecuteRequest,
+  JobLink,
+  RequestKeyChange,
   RequestKeyPair,
   RequestKeyRegistrationBody,
   RequestSignature,
+  SignedRequestBody,
 } from "./types.js";
 
 const REQUEST_SIGNATURE_FORM = "verdifax.request.v1";
+const REQUEST_SIGNATURE_FORM_V2 = "verdifax.request.v2";
+const REQUEST_SIGNATURE_VERSION_2 = "2";
+const JOB_FORM = "verdifax.job.v1";
 const REQUEST_KEY_PROOF_FORM = "verdifax.request-key.v1";
+const REQUEST_KEY_CHANGE_FORM = "verdifax.request-key-change.v1";
 const SIGNING_KEY_BYTES = 32;
 
 // DER header of a PKCS#8 Ed25519 private key. The 32 raw key bytes follow.
@@ -68,8 +76,18 @@ export function loadSigningKey(key: Uint8Array | KeyObject): KeyObject {
   });
 }
 
-/** The bytes a request signature signs: the fields joined with single
- *  zero bytes, matching the orchestrator's RequestSignaturePreimage. */
+function sha256Hex(text: string): string {
+  return createHash("sha256").update(Buffer.from(text, "utf8")).digest("hex");
+}
+
+/** RFC 3339 UTC in whole seconds. */
+function signedAtNow(): string {
+  return new Date().toISOString().replace(/\.\d+Z$/, "Z");
+}
+
+/** The bytes a version 1 request signature signs: the fields joined with
+ *  single zero bytes, matching the orchestrator's RequestSignaturePreimage.
+ *  The client now sends version 2. See {@link requestSignaturePreimageV2}. */
 export function requestSignaturePreimage(fields: {
   payload_hash: string;
   program_id: string;
@@ -92,9 +110,90 @@ export function requestSignaturePreimage(fields: {
   );
 }
 
-/** Signs one execute request. The server hashes payload_text when it is
- *  non-empty, otherwise the payload string exactly as sent (it does not
- *  base64-decode it), so this does the same.
+/** The bytes a version 2 request signature signs: the fields joined with
+ *  single zero bytes, matching the orchestrator's
+ *  RequestSignaturePreimageV2. With no job, the job fields are empty and
+ *  `final` is false. */
+export function requestSignaturePreimageV2(fields: {
+  body_hash: string;
+  payload_hash: string;
+  program_id: string;
+  route_id: string;
+  registry_record_hash: string;
+  ai_output_hash: string;
+  job?: JobLink;
+  signed_at: string;
+  nonce: string;
+}): Buffer {
+  const { job } = fields;
+  return Buffer.from(
+    [
+      REQUEST_SIGNATURE_FORM_V2,
+      fields.body_hash,
+      fields.payload_hash,
+      fields.program_id,
+      fields.route_id,
+      fields.registry_record_hash,
+      fields.ai_output_hash,
+      JOB_FORM,
+      job?.job_id ?? "",
+      job?.step_id ?? "",
+      (job?.previous_record_hashes ?? []).join(","),
+      (job?.external_previous ?? []).join(","),
+      job?.final ? "true" : "false",
+      fields.signed_at,
+      fields.nonce,
+    ].join("\0"),
+    "utf8",
+  );
+}
+
+/** Signs one execute request with signature version 2 and returns the
+ *  whole body to send. The request is serialized once, and that exact text
+ *  is what is hashed, signed and sent.
+ *
+ *  The payload hash follows the same rule as {@link signRequest}.
+ *  `signedAt` and `nonce` default to the current time and fresh random
+ *  bytes. A nonce the server has already seen is refused. */
+export function signRequestV2(
+  signingKey: Uint8Array | KeyObject,
+  req: ExecuteRequest,
+  options: { signedAt?: string; nonce?: string } = {},
+): SignedRequestBody {
+  const key = loadSigningKey(signingKey);
+  const { request_signature: _unsigned, ...fields } = withExecuteFlags(req);
+  const signed_request = JSON.stringify(fields);
+  const signed_at = options.signedAt ?? signedAtNow();
+  const nonce = options.nonce ?? randomBytes(16).toString("hex");
+  const preimage = requestSignaturePreimageV2({
+    body_hash: sha256Hex(signed_request),
+    payload_hash: sha256Hex(fields.payload_text || fields.payload || ""),
+    program_id: fields.program_id,
+    route_id: fields.route_id,
+    registry_record_hash: fields.registry_record_hash,
+    ai_output_hash: fields.ai_output_text
+      ? sha256Hex(fields.ai_output_text)
+      : "",
+    job: fields.job,
+    signed_at,
+    nonce,
+  });
+  return {
+    signed_request,
+    request_signature: {
+      version: REQUEST_SIGNATURE_VERSION_2,
+      signature: sign(null, preimage, key).toString("base64"),
+      signed_at,
+      nonce,
+    },
+  };
+}
+
+/** Signs one execute request with signature version 1, which the server
+ *  still accepts. The client now sends version 2: see {@link signRequestV2}.
+ *  The server hashes payload_text when it is non-empty, otherwise the
+ *  payload string exactly as sent (it does not base64-decode it), so this
+ *  does the same.
  *
  *  `signedAt` and `nonce` default to the current time and fresh random
  *  bytes. A nonce the server has already seen is refused. */
@@ -104,14 +203,10 @@ export function signRequest(
   options: { signedAt?: string; nonce?: string } = {},
 ): RequestSignature {
   const key = loadSigningKey(signingKey);
-  const signed_at =
-    options.signedAt ?? new Date().toISOString().replace(/\.\d+Z$/, "Z");
+  const signed_at = options.signedAt ?? signedAtNow();
   const nonce = options.nonce ?? randomBytes(16).toString("hex");
-  const payload_hash = createHash("sha256")
-    .update(Buffer.from(req.payload_text || req.payload || "", "utf8"))
-    .digest("hex");
   const preimage = requestSignaturePreimage({
-    payload_hash,
+    payload_hash: sha256Hex(req.payload_text || req.payload || ""),
     program_id: req.program_id,
     route_id: req.route_id,
     registry_record_hash: req.registry_record_hash,
@@ -138,4 +233,46 @@ export function requestKeyRegistrationBody(
     key,
   ).toString("base64");
   return { public_key, proof };
+}
+
+/** The bytes the current key signs to replace or clear itself. `new_public_key`
+ *  is the new base64 public key, or empty when clearing. */
+export function requestKeyChangePreimage(fields: {
+  new_public_key: string;
+  signed_at: string;
+  nonce: string;
+}): Buffer {
+  return Buffer.from(
+    [
+      REQUEST_KEY_CHANGE_FORM,
+      fields.new_public_key,
+      fields.signed_at,
+      fields.nonce,
+    ].join("\0"),
+    "utf8",
+  );
+}
+
+/** The current key's approval of a key change, the `change` value of POST
+ *  and DELETE /keys/request-key. Pass an empty `newPublicKey` when clearing.
+ *  `signedAt` and `nonce` default to the current time and fresh random
+ *  bytes. */
+export function requestKeyChangeApproval(
+  currentSigningKey: Uint8Array | KeyObject,
+  newPublicKey: string,
+  options: { signedAt?: string; nonce?: string } = {},
+): RequestKeyChange {
+  const key = loadSigningKey(currentSigningKey);
+  const signed_at = options.signedAt ?? signedAtNow();
+  const nonce = options.nonce ?? randomBytes(16).toString("hex");
+  const preimage = requestKeyChangePreimage({
+    new_public_key: newPublicKey,
+    signed_at,
+    nonce,
+  });
+  return {
+    signature: sign(null, preimage, key).toString("base64"),
+    signed_at,
+    nonce,
+  };
 }

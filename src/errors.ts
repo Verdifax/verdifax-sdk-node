@@ -51,15 +51,31 @@ export class NotFoundError extends VerdifaxError {
 }
 
 /** Every other non-2xx response. Carries the HTTP status and
- *  the path so callers can switch on either dimension. */
+ *  the path so callers can switch on either dimension. `recordHash` is
+ *  the receipt hash of a refused or halted run, when the server sealed
+ *  one; it is undefined when no record exists.
+ *
+ *  `signedRequest` is the exact text that was signed, when the call was a
+ *  signed run. Keep it to pass to `verdifax-verify --request FILE`. It holds
+ *  the payload, so it stays out of the message and is not enumerable: read
+ *  it by name, and logging the error does not print it. */
 export class APIError extends VerdifaxError {
   override readonly name: string = "VerdifaxAPIError";
+  declare readonly signedRequest?: string;
   constructor(
     public readonly status: number,
     public readonly path: string,
     public override readonly message: string,
+    public readonly recordHash?: string,
+    signedRequest?: string,
   ) {
     super(`verdifax: API error at ${path} (HTTP ${status}): ${message}`);
+    if (signedRequest !== undefined) {
+      Object.defineProperty(this, "signedRequest", {
+        value: signedRequest,
+        enumerable: false,
+      });
+    }
   }
 }
 

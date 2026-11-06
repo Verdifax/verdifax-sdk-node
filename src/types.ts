@@ -75,8 +75,27 @@ export interface ExecuteRequest {
   /** Caller-supplied record of what led to this run. Recorded as
    *  supplied. */
   causal_graph?: Record<string, unknown>;
-  /** Filled in by the client when the `signingKey` option is set. */
+  /** Places this run in a job map. Not accepted by a determinism check,
+   *  which runs twice. */
+  job?: JobLink;
+  /** A version 1 signature for an unsigned client to send. A client with
+   *  the `signingKey` option sends version 2 and drops this field. */
   request_signature?: RequestSignature;
+}
+
+/** Places one run in a job. `job_id` and `step_id` are 1 to 128 letters,
+ *  digits, dots, underscores, colons or dashes. The client sorts both
+ *  lists, removes repeats and leaves out an empty list and a false
+ *  `final`. */
+export interface JobLink {
+  job_id: string;
+  step_id: string;
+  /** Record hashes of the steps this one directly follows, in this job. */
+  previous_record_hashes?: Hex64[];
+  /** Record hashes from another account that this step follows. */
+  external_previous?: Hex64[];
+  /** True on the step that closes the job. */
+  final?: boolean;
 }
 
 /** The runtime a caller declares for a run. Every field is optional.
@@ -108,6 +127,30 @@ export interface RequestSignature {
   nonce: string;
 }
 
+/** A version 2 request signature, which covers the exact `signed_request`
+ *  text. */
+export interface RequestSignatureV2 extends RequestSignature {
+  version: "2";
+}
+
+/** The whole body of a signed call, and of each row of a signed batch.
+ *  The server reads the request from `signed_request` alone. */
+export interface SignedRequestBody {
+  /** The request as JSON text, exactly as it was signed. */
+  signed_request: string;
+  request_signature: RequestSignatureV2;
+}
+
+/** The current key's approval of replacing or clearing itself. */
+export interface RequestKeyChange {
+  /** Base64 Ed25519 signature by the current key. */
+  signature: string;
+  /** RFC 3339 UTC with whole seconds. */
+  signed_at: string;
+  /** 16 random bytes as 32 lowercase hex characters, fresh per change. */
+  nonce: string;
+}
+
 /** A key pair from {@link generateRequestKeyPair}, as raw bytes. */
 export interface RequestKeyPair {
   /** The 32-byte Ed25519 public key. */
@@ -124,7 +167,8 @@ export interface RequestKeyRegistrationBody {
   proof: string;
 }
 
-/** Returned by {@link VerdifaxClient.registerRequestKey}. */
+/** Returned by {@link VerdifaxClient.registerRequestKey} and
+ *  {@link VerdifaxClient.rotateRequestKey}. */
 export interface RequestKeyRegistration {
   ok: boolean;
   public_key: string;
@@ -133,8 +177,16 @@ export interface RequestKeyRegistration {
 export interface ExecuteResponse {
   ok: boolean;
   run_id: number;
+  /** The record's hash: the manifest hash of a completed run. A refused or
+   *  halted run throws an {@link APIError} carrying its `recordHash` and,
+   *  when signed, its `signedRequest`. */
+  record_hash?: Hex64;
+  manifest_hash?: Hex64;
   manifest: ExecutionManifest;
   duration_ms: number;
+  /** The exact text that was signed, when the call was signed. Keep it to
+   *  pass to `verdifax-verify --request FILE`. */
+  signed_request?: string;
 }
 
 /** One row of {@link ExecuteBatchResponse}. A successful row has
@@ -145,11 +197,16 @@ export interface ExecuteBatchResult {
   index: number;
   ok: boolean;
   run_id?: number;
+  /** The manifest hash of a completed row, or the receipt hash of a refused
+   *  or halted one. */
+  record_hash?: Hex64;
   manifest_hash?: Hex64;
   manifest?: ExecutionManifest;
   error?: string;
   error_stage?: string;
   duration_ms: number;
+  /** The exact text that was signed for this row, when it was signed. */
+  signed_request?: string;
   partial_manifest?: ExecutionManifest;
   deny_receipt?: Record<string, unknown>;
   ccv_halt_receipt?: Record<string, unknown>;
@@ -194,6 +251,8 @@ export interface VerifyDeterminismResponse {
   first: DeterminismRun;
   second: DeterminismRun;
   diff: DeterminismDiff;
+  /** The exact text that was signed, when the call was signed. */
+  signed_request?: string;
 }
 
 /**
@@ -324,6 +383,22 @@ export interface AttestRequest {
   authorization_chain?: Record<string, unknown>;
   regulatory_scaffolding?: Record<string, unknown>;
   causal_graph?: Record<string, unknown>;
+  /** Places this run in a job map. {@link VerdifaxJob.step} fills it in. */
+  job?: JobLink;
+}
+
+/** The second argument of {@link VerdifaxJob.step}: everything
+ *  {@link VerdifaxClient.attest} takes except `job`, which the helper
+ *  builds, plus the step's place in the job. */
+export interface JobStepOptions extends Omit<AttestRequest, "job"> {
+  /** Step ids in this job that this step directly follows. When omitted,
+   *  the step follows the one run just before it through this helper. An
+   *  empty list means it follows none. */
+  after?: string[];
+  /** Record hashes from another account that this step follows. */
+  external_previous?: Hex64[];
+  /** True on the step that closes the job. */
+  final?: boolean;
 }
 
 /** Optional filters for {@link VerdifaxClient.listRuns}. */
@@ -369,6 +444,8 @@ export interface SearchRunsParams {
 export interface ExportRunsParams {
   from?: string;
   to?: string;
+  /** Limits the export to the runs of one job. */
+  job_id?: string;
 }
 
 /** One run in an evidence export: what the server stored, not a verdict. */
@@ -383,6 +460,11 @@ export interface ExportRow {
   leaf_hash: string;
   complete_record_entry_id: string;
   complete_record_leaf_hash: string;
+  /** Where the row's public-log entry was read from: `bundle`, `receipt`
+   *  or `none`. */
+  anchor_source?: string;
+  job_id?: string;
+  step_id?: string;
 }
 
 /** Body returned by GET /runs/export in JSON form. */

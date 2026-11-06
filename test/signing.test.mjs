@@ -14,6 +14,7 @@ import {
   requestSignaturePreimage,
   signRequest,
 } from "../dist/index.mjs";
+import { publicKeyObject, signedFields, verifiesV2 } from "./signed-body.mjs";
 
 // The vector shared by the four SDKs, so they cannot disagree.
 const SEED = Buffer.alloc(32, 1);
@@ -29,19 +30,8 @@ const SIGNATURE = "PWKn9IplkfrPmXSN+EfJX7aUPoRR0GHqjCvOLG2l1BAvPgupr7ZsJGNujNh6W
 
 const INPUTS = { program_id: PROGRAM_ID, route_id: ROUTE_ID, registry_record_hash: REGISTRY_RECORD_HASH };
 
-function publicKeyObject(raw) {
-  const header = Buffer.from("302a300506032b6570032100", "hex");
-  return crypto.createPublicKey({ key: Buffer.concat([header, raw]), format: "der", type: "spki" });
-}
-
-/** Rebuilds the signed bytes from a received body, as the server does,
- *  written out independently of the SDK. */
 function verifies(body, publicKey = Buffer.from(PUBLIC_KEY, "base64")) {
-  const payload = body.payload_text || body.payload;
-  const hash = crypto.createHash("sha256").update(Buffer.from(payload, "utf8")).digest("hex");
-  const { signature, signed_at, nonce } = body.request_signature;
-  const signed = ["verdifax.request.v1", hash, body.program_id, body.route_id, body.registry_record_hash, signed_at, nonce].join("\0");
-  return crypto.verify(null, Buffer.from(signed, "utf8"), publicKeyObject(publicKey), Buffer.from(signature, "base64"));
+  return verifiesV2(body, publicKey);
 }
 
 async function withServer(config, run, respond = { ok: true, run_id: 7 }) {
@@ -66,12 +56,12 @@ async function withServer(config, run, respond = { ok: true, run_id: 7 }) {
   }
 }
 
-test("shared vector: signature", () => {
+test("shared vector: version 1 signature", () => {
   const signed = signRequest(SEED, { payload_text: "hello", ...INPUTS }, { signedAt: SIGNED_AT, nonce: NONCE });
   assert.deepEqual(signed, { signature: SIGNATURE, signed_at: SIGNED_AT, nonce: NONCE });
 });
 
-test("shared vector: signed bytes", () => {
+test("shared vector: version 1 signed bytes", () => {
   const preimage = requestSignaturePreimage({
     payload_hash: PAYLOAD_HASH,
     program_id: PROGRAM_ID,
@@ -113,7 +103,7 @@ test("attest signs text", async () => {
 test("attest hashes the base64 string as sent, not the decoded bytes", async () => {
   const bytes = Buffer.from([0xff, 0xfe, 0x00]);
   const seen = await withServer({ signingKey: SEED }, (c) => c.attest({ payload: bytes, ...INPUTS }));
-  assert.equal(seen[0].body.payload, "//4A");
+  assert.equal(signedFields(seen[0].body).payload, "//4A");
   assert.ok(verifies(seen[0].body));
 });
 
@@ -135,7 +125,7 @@ for (const [name, call] of [
 test("non-ASCII text hashes its UTF-8 bytes", async () => {
   const text = "caf\u00e9 \u4e16\u754c \u{1f600}";
   const seen = await withServer({ signingKey: SEED }, (c) => c.execute({ payload_text: text, ...INPUTS }));
-  assert.equal(seen[0].body.payload_text, text);
+  assert.equal(signedFields(seen[0].body).payload_text, text);
   assert.ok(verifies(seen[0].body));
 });
 
