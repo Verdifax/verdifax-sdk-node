@@ -15,11 +15,13 @@ import {
   KeyObject,
   randomBytes,
   sign,
+  verify,
 } from "node:crypto";
 
 import { VerdifaxError } from "./errors.js";
 import { withExecuteFlags } from "./helpers.js";
 import type {
+  ApproverKeyProof,
   ExecuteRequest,
   JobLink,
   PolicyActivationSignature,
@@ -28,6 +30,9 @@ import type {
   RequestKeyRegistrationBody,
   RequestSignature,
   SignedRequestBody,
+  SignOffDecision,
+  SignOffSignature,
+  SignOffTarget,
 } from "./types.js";
 
 const REQUEST_SIGNATURE_FORM = "verdifax.request.v1";
@@ -37,7 +42,12 @@ const JOB_FORM = "verdifax.job.v1";
 const REQUEST_KEY_PROOF_FORM = "verdifax.request-key.v1";
 const REQUEST_KEY_CHANGE_FORM = "verdifax.request-key-change.v1";
 const POLICY_ACTIVATION_FORM = "verdifax.policy-activation.v1";
+const SIGNOFF_FORM = "verdifax.signoff.v1";
+const APPROVER_KEY_PROOF_FORM = "verdifax.approver-key.v1";
 const SIGNING_KEY_BYTES = 32;
+
+// DER header of an SPKI Ed25519 public key. The 32 raw key bytes follow.
+const SPKI_ED25519_HEADER = Buffer.from("302a300506032b6570032100", "hex");
 
 // DER header of a PKCS#8 Ed25519 private key. The 32 raw key bytes follow.
 const PKCS8_ED25519_HEADER = Buffer.from(
@@ -78,7 +88,8 @@ export function loadSigningKey(key: Uint8Array | KeyObject): KeyObject {
   });
 }
 
-function sha256Hex(text: string): string {
+/** SHA-256 of the UTF-8 text as 64 lowercase hex characters. */
+export function sha256Hex(text: string): string {
   return createHash("sha256").update(Buffer.from(text, "utf8")).digest("hex");
 }
 
@@ -331,4 +342,121 @@ export function policyActivationApproval(
     signed_at,
     nonce,
   };
+}
+
+/** The bytes an approver key signs for one sign-off, matching the
+ *  orchestrator's SignOffPreimage: the fields joined with single zero
+ *  bytes. `chain_id` and `previous_signoff_hash` come from GET
+ *  /signoffs/newest (or /account/signoffs/newest for the owner key), so a
+ *  signature cannot be moved to another account, another result or
+ *  another point in the chain. `target.job_id` is empty unless the target
+ *  is a job, and `note_hash` is empty when there is no note. */
+export function signOffPreimage(fields: {
+  chain_id: string;
+  previous_signoff_hash: string;
+  target: SignOffTarget;
+  decision: SignOffDecision;
+  note_hash: string;
+  signed_at: string;
+  nonce: string;
+}): Buffer {
+  const { target } = fields;
+  return Buffer.from(
+    [
+      SIGNOFF_FORM,
+      fields.chain_id,
+      fields.previous_signoff_hash,
+      target.kind,
+      String(target.run_id),
+      target.digest,
+      target.job_id ?? "",
+      fields.decision,
+      fields.note_hash,
+      fields.signed_at,
+      fields.nonce,
+    ].join("\0"),
+    "utf8",
+  );
+}
+
+/** The approver key's signature over one sign-off. `signedAt` and `nonce`
+ *  default to the current time and fresh random bytes. */
+export function signOffSignature(
+  approverKey: Uint8Array | KeyObject,
+  fields: {
+    chain_id: string;
+    previous_signoff_hash: string;
+    target: SignOffTarget;
+    decision: SignOffDecision;
+    note_hash: string;
+  },
+  options: { signedAt?: string; nonce?: string } = {},
+): SignOffSignature {
+  const key = loadSigningKey(approverKey);
+  const signed_at = options.signedAt ?? signedAtNow();
+  const nonce = options.nonce ?? randomBytes(16).toString("hex");
+  const preimage = signOffPreimage({ ...fields, signed_at, nonce });
+  return {
+    approver_key: rawPublicKey(createPublicKey(key)).toString("base64"),
+    signature: sign(null, preimage, key).toString("base64"),
+    signed_at,
+    nonce,
+  };
+}
+
+/** The approver key's base64 public key and its proof: its signature over
+ *  verdifax.approver-key.v1, a zero byte and the base64 public key, which
+ *  shows its holder has the private key. The approver can run this on
+ *  their own machine and give the result to the account's owner, who
+ *  registers it with {@link VerdifaxClient.registerApprover}, so the owner
+ *  never holds the approver's private key. */
+export function approverKeyProof(
+  approverKey: Uint8Array | KeyObject,
+): ApproverKeyProof {
+  const key = loadSigningKey(approverKey);
+  const public_key = rawPublicKey(createPublicKey(key)).toString("base64");
+  const proof = sign(
+    null,
+    Buffer.from(`${APPROVER_KEY_PROOF_FORM}\0${public_key}`, "utf8"),
+    key,
+  ).toString("base64");
+  return { public_key, proof };
+}
+
+/** True when `proof` is the holder's signature over the approver key
+ *  proof form for `publicKey`, the check the server makes on
+ *  registration. */
+export function approverKeyProofVerifies(proof: ApproverKeyProof): boolean {
+  if (
+    typeof proof?.public_key !== "string" ||
+    typeof proof?.proof !== "string"
+  ) {
+    return false;
+  }
+  const raw = Buffer.from(proof.public_key, "base64");
+  const signature = Buffer.from(proof.proof, "base64");
+  if (
+    raw.length !== 32 ||
+    raw.toString("base64") !== proof.public_key ||
+    signature.length !== 64 ||
+    signature.toString("base64") !== proof.proof
+  ) {
+    return false;
+  }
+  const publicKey = createPublicKey({
+    key: Buffer.concat([SPKI_ED25519_HEADER, raw]),
+    format: "der",
+    type: "spki",
+  });
+  return verify(
+    null,
+    Buffer.from(`${APPROVER_KEY_PROOF_FORM}\0${proof.public_key}`, "utf8"),
+    publicKey,
+    signature,
+  );
+}
+
+/** The base64 public key of a signing key. */
+export function publicKeyOf(key: KeyObject): string {
+  return rawPublicKey(createPublicKey(key)).toString("base64");
 }

@@ -644,6 +644,11 @@ export interface RunsExport {
  *  key in the account, with the account's policy documents and changes. */
 export interface AccountRunsExport extends RunsExport {
   account_id: string;
+  /** The account's whole chain of sign-offs, oldest first, as
+   *  {@link VerdifaxClient.getSignOffHistory} returns it. Only the owner
+   *  key's export carries it, and the SDK returns it as the server sent
+   *  it, without checking it: check it with `verdifax-verify`. */
+  signoffs?: SignOffRecord[];
 }
 
 /** Returned by {@link VerdifaxClient.exportRunsCSV}. */
@@ -852,5 +857,141 @@ export interface AdminAPIKey {
   created_at: string;
   last_used_at?: string;
   run_count: number;
+  revoked: boolean;
+}
+
+// ── Sign-off ────────────────────────────────────────────────────
+
+/** The kind of result a sign-off names: a completed run's record, a
+ *  refused or halted run's receipt, or a whole job by its final step. */
+export type SignOffTargetKind = "record" | "receipt" | "job";
+
+/** An approver's decision on one result. */
+export type SignOffDecision = "approve" | "reject";
+
+/** The exact result a sign-off names, by what its public-log entry
+ *  covers. */
+export interface SignOffTarget {
+  kind: SignOffTargetKind;
+  /** The run: for a job, the run of its final step. */
+  run_id: number;
+  /** What the result's public-log entry covers. For a record, its
+   *  `bundle_anchor.anchored_digest` in the bundle
+   *  {@link VerdifaxClient.getRunArtifacts} returns. For a receipt, its
+   *  hash. For a job, the final step's record digest, read the same way
+   *  as a record's. 64 lowercase hex characters. */
+  digest: Hex64;
+  /** The job, for a job target only. */
+  job_id?: string;
+}
+
+/** One sign-off, verdifax.signoff.v1, as the server records it and
+ *  `verdifax-verify --signoff` and `--signoff-history` read it. */
+export interface SignOffRecord {
+  format: string;
+  /** The account's chain, `account-N`. */
+  chain_id: string;
+  sequence: number;
+  /** The sign-off this one follows, or 64 zeros for the account's first. */
+  previous_signoff_hash: Hex64;
+  target: SignOffTarget;
+  decision: SignOffDecision;
+  /** SHA-256 of the approver's note, when there was one. The note's text
+   *  never reaches Verdifax. */
+  note_hash?: string;
+  /** The base64 Ed25519 public key of the approver who signed. */
+  approver_key: string;
+  /** Base64 Ed25519 signature by the approver key. */
+  signature: string;
+  signed_at: string;
+  nonce: string;
+  recorded_at: string;
+  signoff_hash: Hex64;
+  /** Where the sign-off was logged on the public log. */
+  anchor?: Record<string, unknown>;
+}
+
+/** What an approver signs against: the account's chain and its newest
+ *  sign-off. Returned by {@link VerdifaxClient.getNewestSignOff}. */
+export interface NewestSignOff {
+  ok: boolean;
+  /** The account's chain, `account-N`. */
+  chain_id: string;
+  /** The newest sign-off's hash, or 64 zeros when there is none yet. */
+  newest_signoff_hash: Hex64;
+  /** The newest sign-off's place in the chain, 0 when there is none. */
+  sequence: number;
+}
+
+/** The approver key's part of a sign-off. */
+export interface SignOffSignature {
+  /** The base64 Ed25519 public key of the approver. */
+  approver_key: string;
+  /** Base64 Ed25519 signature by the approver key. */
+  signature: string;
+  /** RFC 3339 UTC with whole seconds. */
+  signed_at: string;
+  /** 16 random bytes as 32 lowercase hex characters, fresh per sign-off. */
+  nonce: string;
+}
+
+/** Options for {@link VerdifaxClient.signOff}. */
+export interface SignOffOptions {
+  /** The approver's note. It is hashed on this machine and only its
+   *  SHA-256 is sent and signed: the text never reaches Verdifax. Keep the
+   *  text yourself to show it matches the hash. */
+  note?: string;
+  /** Use the owner key's routes, /account/signoffs/newest and
+   *  /account/signoffs, instead of a member key's. */
+  asOwner?: boolean;
+}
+
+/** For a method that serves both a member key's route and the owner
+ *  key's /account route. */
+export interface AsOwnerOptions {
+  /** Use the owner key's /account route. */
+  asOwner?: boolean;
+}
+
+/** An approver key's public key and the proof that its holder has the
+ *  private key, from {@link approverKeyProof}. */
+export interface ApproverKeyProof {
+  /** Base64 of the raw 32-byte public key. */
+  public_key: string;
+  /** Base64 Ed25519 signature over verdifax.approver-key.v1, a zero byte
+   *  and the base64 public key. */
+  proof: string;
+}
+
+/** An approver key registered to an account. A key is not an identity:
+ *  `name` is the label the owner gave it. */
+export interface Approver {
+  id: number;
+  public_key: string;
+  name: string;
+  /** The account, `account-N`. */
+  account_id: string;
+  registered_at: string;
+  revoked: boolean;
+  revoked_at?: string;
+}
+
+/** Returned by {@link VerdifaxClient.registerApprover}. */
+export interface ApproverRegistration extends Approver {
+  ok: boolean;
+}
+
+/** Returned by {@link VerdifaxClient.listApprovers}: revoked keys
+ *  included. */
+export interface ApproverList {
+  ok: boolean;
+  account_id: string;
+  approvers: Approver[];
+}
+
+/** Returned by {@link VerdifaxClient.revokeApprover}. */
+export interface ApproverRevocation {
+  ok: boolean;
+  id: number;
   revoked: boolean;
 }

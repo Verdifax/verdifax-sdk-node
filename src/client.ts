@@ -6,10 +6,15 @@ import {
   VerdifaxError,
 } from "./errors.js";
 import {
+  approverKeyProof,
+  approverKeyProofVerifies,
   loadSigningKey,
   policyActivationApproval,
+  publicKeyOf,
   requestKeyChangeApproval,
   requestKeyRegistrationBody,
+  sha256Hex,
+  signOffSignature,
   signRequestV2,
 } from "./signing.js";
 import {
@@ -33,6 +38,11 @@ import type {
   AdminCreateKeyOptions,
   AdminCreateKeyResponse,
   AdminEraseRequest,
+  ApproverKeyProof,
+  ApproverList,
+  ApproverRegistration,
+  ApproverRevocation,
+  AsOwnerOptions,
   AttestationList,
   AttestRequest,
   ClientConfig,
@@ -50,6 +60,7 @@ import type {
   JobLink,
   ListAttestationsParams,
   ListRunsParams,
+  NewestSignOff,
   PDFFormat,
   Policy,
   PolicyActivation,
@@ -67,13 +78,21 @@ import type {
   RunSummary,
   SearchRunsParams,
   SignedRequestBody,
+  SignOffDecision,
+  SignOffOptions,
+  SignOffRecord,
+  SignOffTarget,
   VerdifaxVersion,
   VerifyDeterminismResponse,
   VerifyResponse,
 } from "./types.js";
-import { validateHex64, validateRouteId } from "./validation.js";
+import {
+  validateHex64,
+  validateJobName,
+  validateRouteId,
+} from "./validation.js";
 import { SDK_VERSION } from "./version.js";
-import type { KeyObject } from "node:crypto";
+import { KeyObject } from "node:crypto";
 
 const DEFAULT_BASE_URL = "https://api.verdifax.com";
 // A successful run makes two public-log entries and, when AI output is sent, an
@@ -93,6 +112,12 @@ const ACCOUNT_POLICIES_PATH = "/account/policies";
 // The chain of an account's policy changes. An account change is signed
 // over this id, so a chain of any other form is refused before signing.
 const ACCOUNT_CHAIN_ID = /^account-[1-9][0-9]*$/;
+const SIGNOFFS_PATH = "/signoffs";
+const ACCOUNT_SIGNOFFS_PATH = "/account/signoffs";
+const APPROVERS_PATH = "/account/approvers";
+const SIGNOFF_TARGET_KINDS = new Set(["record", "receipt", "job"]);
+const SIGNOFF_DECISIONS = new Set(["approve", "reject"]);
+const MAX_APPROVER_NAME_BYTES = 200;
 
 const HEADER_EXPORT_TOTAL = "X-Verdifax-Total";
 const HEADER_EXPORT_TRUNCATED = "X-Verdifax-Truncated";
@@ -216,6 +241,13 @@ interface RawResponse {
  * | `testAccountPolicy(req)` | POST /account/policies/test | owner key |
  * | `getAccountPolicyHistory()` | GET /account/policies/history | owner key |
  * | `activateAccountPolicy(documentHash)` | POST /account/policies/{document_hash}/activate | owner key |
+ * | `registerApprover(name, approver)` | POST /account/approvers | owner key |
+ * | `listApprovers()` | GET /account/approvers | owner key |
+ * | `revokeApprover(id)` | DELETE /account/approvers/{id} | owner key |
+ * | `signOff(target, decision, approverKey, options)` | POST /signoffs, or POST /account/signoffs with asOwner | required |
+ * | `getNewestSignOff(options)` | GET /signoffs/newest, or GET /account/signoffs/newest with asOwner | required |
+ * | `getSignOffs(runId, options)` | GET /runs/{id}/signoffs, or GET /account/runs/{id}/signoffs with asOwner | required |
+ * | `getSignOffHistory()` | GET /account/signoffs/history | owner key |
  * | `job(jobId)` | none, returns a {@link VerdifaxJob} | none |
  *
  * With the `signingKey` option set, every path to POST /execute carries
@@ -787,6 +819,211 @@ export class VerdifaxClient {
       );
     }
     return this.activatePolicyAt(ACCOUNT_POLICIES_PATH, documentHash, chain);
+  }
+
+  // ── Sign-off ─────────────────────────────────────────────────
+  //
+  // An account's owner registers approver keys. An approver signs a
+  // decision, approve or reject, on one exact result on their own machine,
+  // and any key in the account, or the owner key with asOwner, submits it.
+  // A sign-off shows that the holder of a registered approver key signed
+  // that decision on that exact result and that Verdifax logged it on the
+  // public log. It does not show the review was careful, the result right,
+  // or who the person is, and it gates nothing on its own.
+
+  /** Registers an approver key to the owner's account. `approver` is the
+   *  approver's signing key, from which the proof is made on this machine,
+   *  or the `{ public_key, proof }` that {@link approverKeyProof} made on
+   *  the approver's own machine, so the owner need not hold the private
+   *  key. A proof that does not verify is refused before sending. The
+   *  server refuses a key that is a request key in the same account.
+   *  `name` is a label, not an identity. */
+  async registerApprover(
+    name: string,
+    approver: Uint8Array | KeyObject | ApproverKeyProof,
+  ): Promise<ApproverRegistration> {
+    this.requireAPIKey();
+    if (
+      typeof name !== "string" ||
+      name.trim() === "" ||
+      Buffer.byteLength(name.trim(), "utf8") > MAX_APPROVER_NAME_BYTES
+    ) {
+      throw new VerdifaxError(
+        "verdifax: registerApprover needs a name of at most 200 bytes",
+      );
+    }
+    const body =
+      approver instanceof Uint8Array || approver instanceof KeyObject
+        ? approverKeyProof(approver)
+        : { public_key: approver?.public_key, proof: approver?.proof };
+    if (!approverKeyProofVerifies(body as ApproverKeyProof)) {
+      throw new VerdifaxError(
+        "verdifax: registerApprover needs the approver's signing key, or a public_key and proof from approverKeyProof that verify",
+      );
+    }
+    if (this.signingKey && publicKeyOf(this.signingKey) === body.public_key) {
+      throw new VerdifaxError(
+        "verdifax: an approver key must not be a request key in the same account, and this is the client's signingKey",
+      );
+    }
+    return this.request<ApproverRegistration>("POST", APPROVERS_PATH, {
+      public_key: body.public_key,
+      name,
+      proof: body.proof,
+    });
+  }
+
+  /** The account's approver keys, revoked ones included. */
+  async listApprovers(): Promise<ApproverList> {
+    this.requireAPIKey();
+    const out = await this.request<ApproverList>("GET", APPROVERS_PATH);
+    return { ...out, approvers: out?.approvers ?? [] };
+  }
+
+  /** Revokes one of the account's approver keys. Its earlier sign-offs
+   *  stay on the record. A key that is not an active approver in the
+   *  account throws {@link NotFoundError}. */
+  async revokeApprover(approverId: number): Promise<ApproverRevocation> {
+    this.requireAPIKey();
+    requirePositiveId(approverId, "approverId");
+    return this.request<ApproverRevocation>(
+      "DELETE",
+      `${APPROVERS_PATH}/${approverId}`,
+    );
+  }
+
+  /** What an approver signs against: the account's chain `account-N` and
+   *  its newest sign-off (64 zeros when there is none yet). With
+   *  `asOwner` it reads the owner key's route. */
+  async getNewestSignOff(
+    options: AsOwnerOptions = {},
+  ): Promise<NewestSignOff> {
+    this.requireAPIKey();
+    return this.request<NewestSignOff>(
+      "GET",
+      `${signOffsBase(options, "getNewestSignOff")}/newest`,
+    );
+  }
+
+  /** Signs an approver's decision, approve or reject, on one exact result
+   *  and submits it. It first reads {@link getNewestSignOff} for the
+   *  account's chain and its newest sign-off, then signs over them with
+   *  `approverKey` on this machine. The approver's private key is never
+   *  sent.
+   *
+   *  `target.digest` is what the result's public-log entry covers: for a
+   *  record, the `bundle_anchor.anchored_digest` of the bundle
+   *  {@link getRunArtifacts} returns; for a receipt, its hash; for a job,
+   *  the final step's record digest, read as a record's, with `job_id`.
+   *
+   *  `note` is hashed here and only its SHA-256 is sent and signed: the
+   *  text never reaches Verdifax. With `asOwner` it uses the owner key's
+   *  routes. Bad input is refused before anything is sent.
+   *
+   *  The record the server returns must carry the signature,
+   *  approver_key, decision, previous_signoff_hash and target that were
+   *  sent, or this throws {@link VerdifaxError}.
+   *
+   *  A later sign-off on the same result supersedes this one, and neither
+   *  is deleted. An HTTP 409 means the chain moved or the target is not
+   *  this account's result: it throws the usual {@link APIError} and is
+   *  not retried. */
+  async signOff(
+    target: SignOffTarget,
+    decision: SignOffDecision,
+    approverKey: Uint8Array | KeyObject,
+    options: SignOffOptions = {},
+  ): Promise<SignOffRecord> {
+    this.requireAPIKey();
+    const base = signOffsBase(options, "signOff");
+    const exact = signOffTargetOf(target);
+    if (!SIGNOFF_DECISIONS.has(decision)) {
+      throw new VerdifaxError(
+        "verdifax: signOff decision must be approve or reject",
+      );
+    }
+    const note = options?.note;
+    if (note !== undefined && (typeof note !== "string" || note === "")) {
+      throw new VerdifaxError(
+        "verdifax: signOff note must be non-empty text when given",
+      );
+    }
+    const key = loadSigningKey(approverKey);
+    const note_hash = note === undefined ? "" : sha256Hex(note);
+    const newest = await this.getNewestSignOff(options);
+    if (
+      typeof newest?.chain_id !== "string" ||
+      !ACCOUNT_CHAIN_ID.test(newest.chain_id)
+    ) {
+      throw new VerdifaxError(
+        "verdifax: the server did not report an account chain_id (account-N), so the sign-off cannot be signed",
+      );
+    }
+    const previous = newest.newest_signoff_hash;
+    if (typeof previous !== "string" || !/^[0-9a-f]{64}$/.test(previous)) {
+      throw new VerdifaxError(
+        "verdifax: the server did not report newest_signoff_hash, so the sign-off cannot name the one it follows",
+      );
+    }
+    const signed = signOffSignature(key, {
+      chain_id: newest.chain_id,
+      previous_signoff_hash: previous,
+      target: exact,
+      decision,
+      note_hash,
+    });
+    const body: Record<string, unknown> = {
+      previous_signoff_hash: previous,
+      target: exact,
+      decision,
+      ...(note_hash ? { note_hash } : {}),
+      ...signed,
+    };
+    const out = await this.request<{ ok: boolean; signoff: SignOffRecord }>(
+      "POST",
+      base,
+      body,
+    );
+    const record = out?.signoff;
+    if (!recordMatchesSent(record, exact, decision, previous, signed)) {
+      throw new VerdifaxError(
+        "verdifax: the sign-off the server returned does not carry the signature, approver_key, decision, previous_signoff_hash and target that were sent",
+      );
+    }
+    return record;
+  }
+
+  /** The sign-offs on one run, oldest first, in the form
+   *  `verdifax-verify --signoff FILE` reads: for a member key, a run it
+   *  made; with `asOwner`, any run of the account. The latest is the
+   *  decision in force. */
+  async getSignOffs(
+    runId: number,
+    options: AsOwnerOptions = {},
+  ): Promise<SignOffRecord[]> {
+    this.requireAPIKey();
+    requirePositiveId(runId, "runId");
+    const base = asOwnerOf(options, "getSignOffs")
+      ? `${ACCOUNT_PATH}/runs`
+      : "/runs";
+    return (
+      (await this.request<SignOffRecord[]>(
+        "GET",
+        `${base}/${runId}/signoffs`,
+      )) ?? []
+    );
+  }
+
+  /** The account's whole chain of sign-offs, oldest first, in the form
+   *  `verdifax-verify --signoff-history FILE` reads. Needs the owner key. */
+  async getSignOffHistory(): Promise<SignOffRecord[]> {
+    this.requireAPIKey();
+    return (
+      (await this.request<SignOffRecord[]>(
+        "GET",
+        `${ACCOUNT_SIGNOFFS_PATH}/history`,
+      )) ?? []
+    );
   }
 
   // ── Runs ──────────────────────────────────────────────────────
@@ -1401,6 +1638,82 @@ export class VerdifaxClient {
       ? signRequestV2(this.signingKey, req)
       : withExecuteFlags(req);
   }
+}
+
+/** The sign-off routes' base: the owner key's with `asOwner`, otherwise a
+ *  member key's. Anything but true, false or nothing is refused. */
+function signOffsBase(options: AsOwnerOptions, method: string): string {
+  return asOwnerOf(options, method) ? ACCOUNT_SIGNOFFS_PATH : SIGNOFFS_PATH;
+}
+
+/** The `asOwner` option, refused unless it is true, false or left out. */
+function asOwnerOf(options: AsOwnerOptions, method: string): boolean {
+  const asOwner = options?.asOwner;
+  if (asOwner !== undefined && typeof asOwner !== "boolean") {
+    throw new VerdifaxError(`verdifax: ${method} asOwner must be true or false`);
+  }
+  return asOwner === true;
+}
+
+/** The target as the server reads it, with only its own fields, or a
+ *  refusal naming what is wrong. */
+function signOffTargetOf(target: SignOffTarget): SignOffTarget {
+  if (typeof target !== "object" || target === null || Array.isArray(target)) {
+    throw new VerdifaxError("verdifax: signOff needs a target object");
+  }
+  for (const name of Object.keys(target)) {
+    if (!["kind", "run_id", "digest", "job_id"].includes(name)) {
+      throw new VerdifaxError(`verdifax: signOff target has an unknown field: ${name}`);
+    }
+  }
+  if (!SIGNOFF_TARGET_KINDS.has(target.kind)) {
+    throw new VerdifaxError(
+      "verdifax: signOff target kind must be record, receipt or job",
+    );
+  }
+  requirePositiveId(target.run_id, "target.run_id");
+  validateHex64(target.digest, "target.digest");
+  if (target.kind === "job") {
+    validateJobName(target.job_id as string, "target.job_id");
+    return {
+      kind: target.kind,
+      run_id: target.run_id,
+      digest: target.digest,
+      job_id: target.job_id,
+    };
+  }
+  if (target.job_id !== undefined) {
+    throw new VerdifaxError(
+      "verdifax: signOff target job_id is for a job target only",
+    );
+  }
+  return { kind: target.kind, run_id: target.run_id, digest: target.digest };
+}
+
+/** True when the record the server returned carries the signature,
+ *  approver key, decision, previous sign-off and target that were sent. */
+function recordMatchesSent(
+  record: SignOffRecord | undefined,
+  target: SignOffTarget,
+  decision: SignOffDecision,
+  previous: string,
+  signed: { approver_key: string; signature: string },
+): record is SignOffRecord {
+  const got = record?.target;
+  return (
+    typeof record === "object" &&
+    record !== null &&
+    record.signature === signed.signature &&
+    record.approver_key === signed.approver_key &&
+    record.decision === decision &&
+    record.previous_signoff_hash === previous &&
+    typeof got === "object" &&
+    got !== null &&
+    got.kind === target.kind &&
+    got.run_id === target.run_id &&
+    got.digest === target.digest &&
+    (got.job_id ?? "") === (target.job_id ?? "")
+  );
 }
 
 /** Refuses an id that is not a whole number above zero, before it can

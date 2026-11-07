@@ -105,6 +105,13 @@ if (v.verified) {
 | `client.testAccountPolicy({ inputs, document?, documentHash? })` | `POST /account/policies/test` | owner key |
 | `client.getAccountPolicyHistory()` | `GET /account/policies/history` | owner key |
 | `client.activateAccountPolicy(documentHash)` | `POST /account/policies/{document_hash}/activate` | owner key |
+| `client.registerApprover(name, approver)` | `POST /account/approvers` | owner key |
+| `client.listApprovers()` | `GET /account/approvers` | owner key |
+| `client.revokeApprover(id)` | `DELETE /account/approvers/{id}` | owner key |
+| `client.getSignOffHistory()` | `GET /account/signoffs/history` | owner key |
+| `client.getNewestSignOff({ asOwner? })` | `GET /signoffs/newest`, or `GET /account/signoffs/newest` with `asOwner` | required, or owner key |
+| `client.signOff(target, decision, approverKey, { note?, asOwner? })` | `POST /signoffs`, or `POST /account/signoffs` with `asOwner` | required, or owner key |
+| `client.getSignOffs(runId, { asOwner? })` | `GET /runs/{id}/signoffs`, or `GET /account/runs/{id}/signoffs` with `asOwner` | required, or owner key |
 | `client.adminCreateKey(name, { accountId? })` | `POST /admin/keys` | admin |
 | `client.adminListKeys()` | `GET /admin/keys` | admin |
 | `client.adminRevokeKey(id)` | `DELETE /admin/keys/{id}` | admin |
@@ -115,7 +122,7 @@ if (v.verified) {
 
 `client.job(jobId)` returns a [job helper](#jobs) and makes no request until a step runs.
 
-These functions make no request: `captureEnvironment`, `formatProviderPayload`, `signRequest`, `signRequestV2`, `requestKeyRegistrationBody`, `requestKeyChangeApproval`, `requestKeyChangePreimage`, `policyActivationApproval`, `policyActivationPreimage`, `requestSignaturePreimage`, `requestSignaturePreimageV2`, `generateRequestKeyPair`, `validateHex64`, `validateJobName`, `validateRouteId`, `dseDispatchHash`, `dcaeClosureHash` and `cresReceiptHash`. `RUN_STATUSES` lists every run status the server uses, and `EXECUTE_FIELDS` lists every top-level key a run request may hold.
+These functions make no request: `captureEnvironment`, `formatProviderPayload`, `signRequest`, `signRequestV2`, `requestKeyRegistrationBody`, `requestKeyChangeApproval`, `requestKeyChangePreimage`, `policyActivationApproval`, `policyActivationPreimage`, `signOffPreimage`, `approverKeyProof`, `requestSignaturePreimage`, `requestSignaturePreimageV2`, `generateRequestKeyPair`, `validateHex64`, `validateJobName`, `validateRouteId`, `dseDispatchHash`, `dcaeClosureHash` and `cresReceiptHash`. `RUN_STATUSES` lists every run status the server uses, and `EXECUTE_FIELDS` lists every top-level key a run request may hold.
 
 `getRunArtifacts`, `getPublicBundle` and `getPublicBundleByToken` return the exact JSON text the server sent, so you can save it and check it with `verdifax-verify`.
 
@@ -292,6 +299,56 @@ The account's view covers the runs its keys made through Verdifax. It does not c
 `activateAccountPolicy` reads `listAccountPolicies` first, names the newest change as the one it follows and signs the change over the account's chain, `account-N`, with the same signature `activatePolicy` uses. The server refuses an unsigned account policy change, so `activateAccountPolicy` needs the `signingKey` option, set to the owner key's registered request key, and refuses before sending anything without it. It also refuses a `chain_id` that is not of the form `account-N`. The other account policy methods take and return what the matching key policy methods do. `getAccountPolicyHistory` returns the account's changes oldest first, in the form `verdifax-verify --policy-history FILE` reads.
 
 `exportAccountRuns` and `exportAccountRunsCSV` take the same period and `job_id` as `exportRuns` and check the CSV counts the same way. The JSON form also carries `account_id`, and `account_policy_documents` and `account_policy_history` once the account has loaded a policy. `listAccountRuns` pages like `listRuns`. `revokeAccountKey` revokes a member key, and a key in another account, or an owner key, throws `NotFoundError`. `adminCreateKey(name, { accountId })` puts a new customer key in an existing account, by its number.
+
+## Sign-off
+
+A sign-off is an approver's decision, approve or reject, on one exact result: a completed run's record, a refused or halted run's receipt, or a whole job by its final step. The approver signs it on their own machine with an approver key, and Verdifax links it to the account's previous sign-off and logs it on the public log.
+
+```typescript
+import { writeFileSync } from "node:fs";
+import { VerdifaxClient, approverKeyProof, generateRequestKeyPair } from "verdifax";
+
+// The approver creates a key on their own machine and keeps the private key.
+const approverKey = generateRequestKeyPair().privateKey;
+const proof = approverKeyProof(approverKey); // { public_key, proof }, safe to hand to the owner
+
+// The account's owner registers the approver key.
+const owner = new VerdifaxClient({ apiKey: process.env.VERDIFAX_OWNER_KEY! });
+await owner.registerApprover("credit review", proof);
+
+// Any key in the account submits the approver's signed decision on one exact result.
+const member = new VerdifaxClient({ apiKey: process.env.VERDIFAX_API_KEY! });
+const bundle = JSON.parse(await member.getRunArtifacts(1042));
+const signOff = await member.signOff(
+  { kind: "record", run_id: 1042, digest: bundle.bundle_anchor.anchored_digest },
+  "approve",
+  approverKey,
+  { note: "Checked against the loan file." }, // only its SHA-256 is sent
+);
+console.log(signOff.sequence, signOff.signoff_hash);
+
+// Save the run's sign-offs and check them with verdifax-verify --signoff signoffs.json.
+writeFileSync("signoffs.json", JSON.stringify(await member.getSignOffs(1042)));
+
+// The owner saves the account's whole chain for verdifax-verify --signoff-history.
+writeFileSync("signoff-history.json", JSON.stringify(await owner.getSignOffHistory()));
+```
+
+An approver key is registered by the account's owner, and it is never a request key in the same account. The server refuses to register a key that is, so the key that requested a run cannot sign it off. `registerApprover` takes the approver's signing key, from which it makes the proof on this machine, or the `{ public_key, proof }` that `approverKeyProof` made on the approver's own machine, so the owner need not hold the approver's private key. It refuses a proof that does not verify before sending. `revokeApprover` revokes a key, and its earlier sign-offs stay on the record. `listApprovers` lists revoked keys too.
+
+`signOff` reads `getNewestSignOff` first for the account's chain, `account-N`, and its newest sign-off, then signs over them, the target, the decision, the note's hash, the time and a fresh nonce. The approver's private key is never sent. The target's `digest` is what the result's public-log entry covers: for a record, the `bundle_anchor.anchored_digest` of the bundle `getRunArtifacts` returns; for a receipt, its hash; for a job, the final step's record digest, read the same way as a record's, with `job_id`. The note is hashed on your machine and only its SHA-256 is sent and signed: the note's text never reaches Verdifax, so keep it yourself. `signOff` refuses a bad target, decision, key or note before sending anything. It also checks that the record the server returns carries the signature, `approver_key`, `decision`, `previous_signoff_hash` and `target` that were sent, and throws `VerdifaxError` if not. An HTTP 409 means another sign-off came first or the target is not this account's result: it throws the usual `APIError` and is not retried.
+
+With `asOwner: true`, `signOff`, `getNewestSignOff` and `getSignOffs` use the owner key's `/account` routes. `getSignOffs` returns a run's sign-offs oldest first, in the form `verdifax-verify --signoff FILE` reads: for a member key, a run it made; with `asOwner`, any run of the account. `getSignOffHistory` returns the account's whole chain, oldest first, in the form `verdifax-verify --signoff-history FILE` reads, and `exportAccountRuns` carries the same chain as `signoffs`. The SDK returns `signoffs` as the server sent it, without checking it: check it with `verdifax-verify --signoff-history`.
+
+A sign-off shows that the holder of a registered approver key signed that decision on that exact result, and that Verdifax logged it on the public log. It does not show that the review was careful, that the result is right, or who the person is. A key is not an identity.
+
+A sign-off gates nothing on its own.
+
+A later sign-off on the same result supersedes the earlier one, and nothing is deleted.
+
+Verdifax did not review the result.
+
+Since v0.22.0, the verifier reads sign-offs with `--signoff` and `--signoff-history`.
 
 ## Evidence export
 
