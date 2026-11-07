@@ -22,12 +22,22 @@ import {
 } from "./helpers.js";
 import { VerdifaxJob } from "./job.js";
 import type {
+  Account,
+  AccountInfo,
+  AccountKeyList,
+  AccountKeyRevocation,
+  AccountRunsExport,
   AdminAPIKey,
+  AdminCreateAccountOptions,
+  AdminCreateAccountResponse,
+  AdminCreateKeyOptions,
   AdminCreateKeyResponse,
   AdminEraseRequest,
   AttestationList,
   AttestRequest,
   ClientConfig,
+  CreateAccountKeyOptions,
+  CreatedAccountKey,
   DCAEProofBundle,
   DCAEVerdict,
   DeletionReceipt,
@@ -77,6 +87,12 @@ const SDK_USER_AGENT = `verdifax-sdk-node/${SDK_VERSION}`;
 const HEADER_API_KEY = "X-Verdifax-Key";
 const REQUEST_KEY_PATH = "/keys/request-key";
 const POLICIES_PATH = "/policies";
+const ACCOUNT_PATH = "/account";
+const ACCOUNT_REQUEST_KEY_PATH = "/account/request-key";
+const ACCOUNT_POLICIES_PATH = "/account/policies";
+// The chain of an account's policy changes. An account change is signed
+// over this id, so a chain of any other form is refused before signing.
+const ACCOUNT_CHAIN_ID = /^account-[1-9][0-9]*$/;
 
 const HEADER_EXPORT_TOTAL = "X-Verdifax-Total";
 const HEADER_EXPORT_TRUNCATED = "X-Verdifax-Truncated";
@@ -168,10 +184,12 @@ interface RawResponse {
  * | `listDeletionReceipts(id)` | GET /runs/{id}/deletion-receipts | required |
  * | `adminErase(req)` | POST /admin/erase | required |
  * | `dcaeVerify(bundle)` | POST /dcae/verify | none |
- * | `adminCreateKey(name)` | POST /admin/keys | required |
+ * | `adminCreateKey(name, options)` | POST /admin/keys | required |
  * | `adminListKeys()` | GET /admin/keys | required |
  * | `adminRevokeKey(id)` | DELETE /admin/keys/{id} | required |
  * | `adminClearRequestKey(id)` | DELETE /admin/keys/{id}/request-key | required |
+ * | `adminCreateAccount(name, options)` | POST /admin/accounts | required |
+ * | `adminListAccounts()` | GET /admin/accounts | required |
  * | `attestClaudeResponse(...)` | POST /execute (helper) | required |
  * | `attestOpenAIResponse(...)` | POST /execute (helper) | required |
  * | `registerRequestKey()` | POST /keys/request-key | required |
@@ -183,6 +201,21 @@ interface RawResponse {
  * | `testPolicy(req)` | POST /policies/test | required |
  * | `getPolicyHistory()` | GET /policies/history | required |
  * | `activatePolicy(documentHash)` | POST /policies/{document_hash}/activate | required |
+ * | `getAccount()` | GET /account | owner key |
+ * | `createAccountKey(name, options)` | POST /account/keys | owner key |
+ * | `listAccountKeys()` | GET /account/keys | owner key |
+ * | `revokeAccountKey(id)` | DELETE /account/keys/{id} | owner key |
+ * | `registerAccountRequestKey()` | POST /account/request-key | owner key |
+ * | `clearAccountRequestKey()` | DELETE /account/request-key | owner key |
+ * | `listAccountRuns(params)` | GET /account/runs | owner key |
+ * | `exportAccountRuns(params)` | GET /account/runs/export | owner key |
+ * | `exportAccountRunsCSV(params)` | GET /account/runs/export?format=csv | owner key |
+ * | `uploadAccountPolicy(document)` | POST /account/policies | owner key |
+ * | `listAccountPolicies()` | GET /account/policies | owner key |
+ * | `getAccountPolicy(documentHash)` | GET /account/policies/{document_hash} | owner key |
+ * | `testAccountPolicy(req)` | POST /account/policies/test | owner key |
+ * | `getAccountPolicyHistory()` | GET /account/policies/history | owner key |
+ * | `activateAccountPolicy(documentHash)` | POST /account/policies/{document_hash}/activate | owner key |
  * | `job(jobId)` | none, returns a {@link VerdifaxJob} | none |
  *
  * With the `signingKey` option set, every path to POST /execute carries
@@ -372,15 +405,22 @@ export class VerdifaxClient {
    *  that the client holds the private key. From then on the server
    *  refuses a run on this API key without a request signature. */
   async registerRequestKey(): Promise<RequestKeyRegistration> {
+    return this.registerRequestKeyAt(REQUEST_KEY_PATH, "registerRequestKey");
+  }
+
+  private async registerRequestKeyAt(
+    path: string,
+    method: string,
+  ): Promise<RequestKeyRegistration> {
     this.requireAPIKey();
     if (!this.signingKey) {
       throw new VerdifaxError(
-        "verdifax: registerRequestKey needs the signingKey client option",
+        `verdifax: ${method} needs the signingKey client option`,
       );
     }
     return this.request<RequestKeyRegistration>(
       "POST",
-      REQUEST_KEY_PATH,
+      path,
       requestKeyRegistrationBody(this.signingKey),
     );
   }
@@ -423,10 +463,14 @@ export class VerdifaxClient {
    *  unsigned requests, because the server refuses a signed run on an API
    *  key with no registered key. If the call fails it keeps the key. */
   async clearRequestKey(): Promise<void> {
+    await this.clearRequestKeyAt(REQUEST_KEY_PATH);
+  }
+
+  private async clearRequestKeyAt(path: string): Promise<void> {
     this.requireAPIKey();
     await this.request<void>(
       "DELETE",
-      REQUEST_KEY_PATH,
+      path,
       this.signingKey
         ? { change: requestKeyChangeApproval(this.signingKey, "") }
         : undefined,
@@ -442,13 +486,7 @@ export class VerdifaxClient {
    *  not a string: serializing an object here would change the hash.
    *  Verdifax does not write, review or approve a customer's policy. */
   async uploadPolicy(document: string): Promise<Policy> {
-    this.requireAPIKey();
-    if (typeof document !== "string") {
-      throw new VerdifaxError(
-        "verdifax: document must be the policy's exact text, as a string",
-      );
-    }
-    return this.request<Policy>("POST", POLICIES_PATH, { document });
+    return this.uploadPolicyAt(POLICIES_PATH, document);
   }
 
   /** This key's stored documents, with the chain its changes belong to,
@@ -461,45 +499,14 @@ export class VerdifaxClient {
 
   /** One stored document, with its exact text as `document`. */
   async getPolicy(documentHash: Hex64): Promise<PolicyWithDocument> {
-    this.requireAPIKey();
-    validateHex64(documentHash, "documentHash");
-    return this.request<PolicyWithDocument>(
-      "GET",
-      `${POLICIES_PATH}/${documentHash}`,
-    );
+    return this.getPolicyAt(POLICIES_PATH, documentHash);
   }
 
   /** Shows which rule would fire on sample inputs, for a document given as
    *  text or one already stored, named by its hash: exactly one of the two.
    *  It seals nothing. */
   async testPolicy(req: PolicyTestRequest): Promise<PolicyTestResult> {
-    this.requireAPIKey();
-    const { inputs, document, documentHash } = req ?? ({} as PolicyTestRequest);
-    if ((document === undefined) === (documentHash === undefined)) {
-      throw new VerdifaxError(
-        "verdifax: testPolicy needs exactly one of document or documentHash",
-      );
-    }
-    if (typeof inputs !== "object" || inputs === null || Array.isArray(inputs)) {
-      throw new VerdifaxError("verdifax: testPolicy needs inputs as an object");
-    }
-    const body: Record<string, unknown> = { inputs };
-    if (document !== undefined) {
-      if (typeof document !== "string") {
-        throw new VerdifaxError(
-          "verdifax: document must be the policy's exact text, as a string",
-        );
-      }
-      body.document = document;
-    } else {
-      validateHex64(documentHash!, "documentHash");
-      body.document_hash = documentHash;
-    }
-    return this.request<PolicyTestResult>(
-      "POST",
-      `${POLICIES_PATH}/test`,
-      body,
-    );
+    return this.testPolicyAt(POLICIES_PATH, req, "testPolicy");
   }
 
   /** This key's policy changes, oldest first, as the list the server sends.
@@ -527,7 +534,69 @@ export class VerdifaxClient {
   async activatePolicy(documentHash: Hex64): Promise<PolicyActivation> {
     this.requireAPIKey();
     validateHex64(documentHash, "documentHash");
-    const chain = await this.listPolicies();
+    return this.activatePolicyAt(
+      POLICIES_PATH,
+      documentHash,
+      await this.listPolicies(),
+    );
+  }
+
+  private async uploadPolicyAt(base: string, document: string): Promise<Policy> {
+    this.requireAPIKey();
+    if (typeof document !== "string") {
+      throw new VerdifaxError(
+        "verdifax: document must be the policy's exact text, as a string",
+      );
+    }
+    return this.request<Policy>("POST", base, { document });
+  }
+
+  private async getPolicyAt(
+    base: string,
+    documentHash: Hex64,
+  ): Promise<PolicyWithDocument> {
+    this.requireAPIKey();
+    validateHex64(documentHash, "documentHash");
+    return this.request<PolicyWithDocument>("GET", `${base}/${documentHash}`);
+  }
+
+  private async testPolicyAt(
+    base: string,
+    req: PolicyTestRequest,
+    method: string,
+  ): Promise<PolicyTestResult> {
+    this.requireAPIKey();
+    const { inputs, document, documentHash } = req ?? ({} as PolicyTestRequest);
+    if ((document === undefined) === (documentHash === undefined)) {
+      throw new VerdifaxError(
+        `verdifax: ${method} needs exactly one of document or documentHash`,
+      );
+    }
+    if (typeof inputs !== "object" || inputs === null || Array.isArray(inputs)) {
+      throw new VerdifaxError(`verdifax: ${method} needs inputs as an object`);
+    }
+    const body: Record<string, unknown> = { inputs };
+    if (document !== undefined) {
+      if (typeof document !== "string") {
+        throw new VerdifaxError(
+          "verdifax: document must be the policy's exact text, as a string",
+        );
+      }
+      body.document = document;
+    } else {
+      validateHex64(documentHash!, "documentHash");
+      body.document_hash = documentHash;
+    }
+    return this.request<PolicyTestResult>("POST", `${base}/test`, body);
+  }
+
+  /** Posts the change that follows the newest one in `chain`, signed by
+   *  the request key when the client has one. */
+  private async activatePolicyAt(
+    base: string,
+    documentHash: Hex64,
+    chain: PolicyList,
+  ): Promise<PolicyActivation> {
     const previous = chain?.newest_activation_hash;
     if (typeof previous !== "string") {
       throw new VerdifaxError(
@@ -552,10 +621,172 @@ export class VerdifaxClient {
     }
     const out = await this.request<{ ok: boolean; activation: PolicyActivation }>(
       "POST",
-      `${POLICIES_PATH}/${documentHash}/activate`,
+      `${base}/${documentHash}/activate`,
       body,
     );
     return out.activation;
+  }
+
+  // ── Account, with its owner key (auth) ───────────────────────
+  //
+  // An account is a company on Verdifax. Every key belongs to one account
+  // for life. These methods need the account's owner key, which manages the
+  // account and cannot run anything: the server refuses it on every other
+  // route. The account number is a label Verdifax assigned, not a verified
+  // company identity.
+
+  /** The owner's account: its number, name, tier, key counts and the
+   *  chain of its policy changes. */
+  async getAccount(): Promise<AccountInfo> {
+    this.requireAPIKey();
+    return this.request<AccountInfo>("GET", ACCOUNT_PATH);
+  }
+
+  /** Creates a member key in the account. It takes the account's tier and
+   *  stays in the account for life. The secret is in the result this once.
+   *  On a trial account the key needs a request key before it can run. */
+  async createAccountKey(
+    name: string,
+    options: CreateAccountKeyOptions = {},
+  ): Promise<CreatedAccountKey> {
+    this.requireAPIKey();
+    if (typeof name !== "string" || name.trim() === "") {
+      throw new VerdifaxError(
+        "verdifax: name is required for createAccountKey",
+      );
+    }
+    const body: { name: string; expires_at?: string } = { name };
+    if (options.expiresAt !== undefined) body.expires_at = options.expiresAt;
+    return this.request<CreatedAccountKey>(
+      "POST",
+      `${ACCOUNT_PATH}/keys`,
+      body,
+    );
+  }
+
+  /** Every key in the account, owner keys included, without secrets. */
+  async listAccountKeys(): Promise<AccountKeyList> {
+    this.requireAPIKey();
+    const out = await this.request<AccountKeyList>(
+      "GET",
+      `${ACCOUNT_PATH}/keys`,
+    );
+    return { ...out, keys: out?.keys ?? [] };
+  }
+
+  /** Revokes one of the account's member keys. A key in another account,
+   *  or an owner key, throws {@link NotFoundError}. */
+  async revokeAccountKey(keyId: number): Promise<AccountKeyRevocation> {
+    this.requireAPIKey();
+    requirePositiveId(keyId, "keyId");
+    return this.request<AccountKeyRevocation>(
+      "DELETE",
+      `${ACCOUNT_PATH}/keys/${keyId}`,
+    );
+  }
+
+  /** Registers this client's public key as the owner key's request key,
+   *  which must sign every change to the account's policy. It works as
+   *  {@link registerRequestKey} does. */
+  async registerAccountRequestKey(): Promise<RequestKeyRegistration> {
+    return this.registerRequestKeyAt(
+      ACCOUNT_REQUEST_KEY_PATH,
+      "registerAccountRequestKey",
+    );
+  }
+
+  /** Clears the owner key's request key, as {@link clearRequestKey} does
+   *  for a key's own. With none registered the account's policy cannot be
+   *  changed. A trial owner key's request key cannot be cleared. */
+  async clearAccountRequestKey(): Promise<void> {
+    await this.clearRequestKeyAt(ACCOUNT_REQUEST_KEY_PATH);
+  }
+
+  /** The runs of every key in the account, paged as {@link listRuns}. */
+  async listAccountRuns(params: ListRunsParams = {}): Promise<{
+    runs: RunSummary[];
+    total: number;
+  }> {
+    return this.listRunsAt(`${ACCOUNT_PATH}/runs`, params);
+  }
+
+  /** The runs of every key in the account in a period, as
+   *  {@link exportRuns} lists a key's, with the account's number, its
+   *  policy documents and its chain of changes. The account's view covers
+   *  the runs its keys made through Verdifax, not runs made elsewhere. */
+  async exportAccountRuns(
+    params: ExportRunsParams = {},
+  ): Promise<AccountRunsExport> {
+    this.requireAPIKey();
+    return this.request<AccountRunsExport>(
+      "GET",
+      this.exportPath(`${ACCOUNT_PATH}/runs/export`, params, "json"),
+    );
+  }
+
+  /** The same rows as {@link exportAccountRuns} as raw CSV text, checked
+   *  as {@link exportRunsCSV} checks a key's. */
+  async exportAccountRunsCSV(
+    params: ExportRunsParams = {},
+  ): Promise<RunsExportCSV> {
+    return this.exportCSVAt(`${ACCOUNT_PATH}/runs/export`, params);
+  }
+
+  /** Stores an account policy document, as {@link uploadPolicy} stores a
+   *  key's. Every key in the account must pass the account's policy on top
+   *  of its own. Verdifax does not write, review or approve it. */
+  async uploadAccountPolicy(document: string): Promise<Policy> {
+    return this.uploadPolicyAt(ACCOUNT_POLICIES_PATH, document);
+  }
+
+  /** The account's stored documents, its chain `account-N`, the newest
+   *  change in it and the document in force. */
+  async listAccountPolicies(): Promise<PolicyList> {
+    this.requireAPIKey();
+    return this.request<PolicyList>("GET", ACCOUNT_POLICIES_PATH);
+  }
+
+  /** One of the account's documents, with its exact text. */
+  async getAccountPolicy(documentHash: Hex64): Promise<PolicyWithDocument> {
+    return this.getPolicyAt(ACCOUNT_POLICIES_PATH, documentHash);
+  }
+
+  /** {@link testPolicy} for the account's documents. It seals nothing. */
+  async testAccountPolicy(req: PolicyTestRequest): Promise<PolicyTestResult> {
+    return this.testPolicyAt(ACCOUNT_POLICIES_PATH, req, "testAccountPolicy");
+  }
+
+  /** The account's policy changes, oldest first, in the form
+   *  `verdifax-verify --policy-history FILE` reads. */
+  async getAccountPolicyHistory(): Promise<PolicyActivation[]> {
+    this.requireAPIKey();
+    return this.request<PolicyActivation[]>(
+      "GET",
+      `${ACCOUNT_POLICIES_PATH}/history`,
+    );
+  }
+
+  /** Makes a stored document the account's policy in force, as
+   *  {@link activatePolicy} does for a key's. It reads
+   *  {@link listAccountPolicies} for the chain and its newest change, and
+   *  the owner key's request key signs the change over that chain,
+   *  `account-N`. The server refuses an unsigned account change, so this
+   *  needs the `signingKey` option and refuses to send without it. */
+  async activateAccountPolicy(documentHash: Hex64): Promise<PolicyActivation> {
+    this.requireAPIKey();
+    validateHex64(documentHash, "documentHash");
+    if (!this.signingKey) {
+      throw new VerdifaxError(
+        "verdifax: activateAccountPolicy needs the owner key's request key in the signingKey client option, because the server refuses an unsigned account policy change",
+      );
+    }
+    const chain = await this.listAccountPolicies();
+    if (typeof chain?.chain_id !== "string" || !ACCOUNT_CHAIN_ID.test(chain.chain_id)) {
+      throw new VerdifaxError(
+        "verdifax: the server did not report an account chain_id (account-N), so the change cannot be signed",
+      );
+    }
+    return this.activatePolicyAt(ACCOUNT_POLICIES_PATH, documentHash, chain);
   }
 
   // ── Runs ──────────────────────────────────────────────────────
@@ -576,6 +807,13 @@ export class VerdifaxClient {
     runs: RunSummary[];
     total: number;
   }> {
+    return this.listRunsAt("/runs", params);
+  }
+
+  private async listRunsAt(base: string, params: ListRunsParams): Promise<{
+    runs: RunSummary[];
+    total: number;
+  }> {
     this.requireAPIKey();
     const q = new URLSearchParams();
     if (params.limit && params.limit > 0) {
@@ -585,7 +823,7 @@ export class VerdifaxClient {
       q.set("offset", String(params.offset));
     }
     const qs = q.toString();
-    const path = qs ? `/runs?${qs}` : "/runs";
+    const path = qs ? `${base}?${qs}` : base;
     const out = await this.request<{
       ok: boolean;
       runs: RunSummary[];
@@ -636,7 +874,10 @@ export class VerdifaxClient {
    *  call that never reached Verdifax cannot appear in it. */
   async exportRuns(params: ExportRunsParams = {}): Promise<RunsExport> {
     this.requireAPIKey();
-    return this.request<RunsExport>("GET", this.exportPath(params, "json"));
+    return this.request<RunsExport>(
+      "GET",
+      this.exportPath("/runs/export", params, "json"),
+    );
   }
 
   /** The same rows as {@link exportRuns}: the raw CSV text with `total`
@@ -645,9 +886,16 @@ export class VerdifaxClient {
    *  does not send those headers, so that a cut-off export cannot pass
    *  for a complete one. */
   async exportRunsCSV(params: ExportRunsParams = {}): Promise<RunsExportCSV> {
+    return this.exportCSVAt("/runs/export", params);
+  }
+
+  private async exportCSVAt(
+    base: string,
+    params: ExportRunsParams,
+  ): Promise<RunsExportCSV> {
     this.requireAPIKey();
     const { text, headers } = await this.requestRaw(
-      this.exportPath(params, "csv"),
+      this.exportPath(base, params, "csv"),
     );
     const total = Number.parseInt(headers.get(HEADER_EXPORT_TOTAL) ?? "", 10);
     const truncated = headers.get(HEADER_EXPORT_TRUNCATED);
@@ -662,13 +910,17 @@ export class VerdifaxClient {
     return { csv: text, total, truncated: truncated === "true" };
   }
 
-  private exportPath(params: ExportRunsParams, format: string): string {
+  private exportPath(
+    base: string,
+    params: ExportRunsParams,
+    format: string,
+  ): string {
     const q = new URLSearchParams();
     if (params.from) q.set("from", params.from);
     if (params.to) q.set("to", params.to);
     if (params.job_id) q.set("job_id", params.job_id);
     q.set("format", format);
-    return `/runs/export?${q.toString()}`;
+    return `${base}?${q.toString()}`;
   }
 
   // ── Attestation receipts (auth) ──────────────────────────────
@@ -851,14 +1103,56 @@ export class VerdifaxClient {
 
   // ── Admin: API keys (auth) ───────────────────────────────────
 
-  async adminCreateKey(name: string): Promise<AdminCreateKeyResponse> {
+  /** Creates a customer key. With `accountId` the key joins that existing
+   *  account; without it the key gets an account of its own. A key never
+   *  changes account. */
+  async adminCreateKey(
+    name: string,
+    options: AdminCreateKeyOptions = {},
+  ): Promise<AdminCreateKeyResponse> {
     this.requireAPIKey();
     if (!name) {
       throw new VerdifaxError("verdifax: name is required for adminCreateKey");
     }
-    return this.request<AdminCreateKeyResponse>("POST", "/admin/keys", {
-      name,
-    });
+    const body: { name: string; account_id?: number } = { name };
+    if (options.accountId !== undefined) {
+      requirePositiveId(options.accountId, "accountId");
+      body.account_id = options.accountId;
+    }
+    return this.request<AdminCreateKeyResponse>("POST", "/admin/keys", body);
+  }
+
+  /** Creates an account and its first owner key, whose secret is in the
+   *  result this once. The owner key creates the member keys. The account
+   *  number is a label Verdifax assigned, not a verified company identity. */
+  async adminCreateAccount(
+    name: string,
+    options: AdminCreateAccountOptions = {},
+  ): Promise<AdminCreateAccountResponse> {
+    this.requireAPIKey();
+    if (typeof name !== "string" || name.trim() === "") {
+      throw new VerdifaxError(
+        "verdifax: name is required for adminCreateAccount",
+      );
+    }
+    const body: { name: string; tier?: string; expires_at?: string } = { name };
+    if (options.tier !== undefined) body.tier = options.tier;
+    if (options.expiresAt !== undefined) body.expires_at = options.expiresAt;
+    return this.request<AdminCreateAccountResponse>(
+      "POST",
+      "/admin/accounts",
+      body,
+    );
+  }
+
+  /** Every account, with its key counts. */
+  async adminListAccounts(): Promise<Account[]> {
+    this.requireAPIKey();
+    const out = await this.request<{ ok: boolean; accounts: Account[] }>(
+      "GET",
+      "/admin/accounts",
+    );
+    return out?.accounts ?? [];
   }
 
   async adminListKeys(): Promise<AdminAPIKey[]> {
@@ -1106,6 +1400,14 @@ export class VerdifaxClient {
     return this.signingKey
       ? signRequestV2(this.signingKey, req)
       : withExecuteFlags(req);
+  }
+}
+
+/** Refuses an id that is not a whole number above zero, before it can
+ *  reach a path or a body. */
+function requirePositiveId(id: number, name: string): void {
+  if (!Number.isSafeInteger(id) || id <= 0) {
+    throw new VerdifaxError(`verdifax: ${name} must be a whole number > 0`);
   }
 }
 

@@ -361,8 +361,13 @@ export interface DeterminismRun {
   manifest_hash: string;
   bundle_hash: string;
   duration_ms: number;
+  /** `ok`, `stage_error`, or the refusal or halt kind, such as
+   *  `pepg_deny`. */
   status: string;
   error?: string;
+  /** The sealed receipt of a refused or halted run. The run's manifest
+   *  hash covers its hash. */
+  receipt?: Record<string, unknown>;
 }
 
 /** How the two runs of a determinism check compared. */
@@ -371,10 +376,13 @@ export interface DeterminismDiff {
   manifest_hash_differs: boolean;
   bundle_hash_differs: boolean;
   differing_fields?: string[];
+  /** Why there is no verdict, when neither run sealed a record. */
+  reason?: string;
 }
 
 /** Body returned by POST /execute/verify-determinism. `deterministic`
- *  means both runs ended ok with equal manifest hashes. */
+ *  means both runs ended the same way, completed or refused, with equal
+ *  manifest hashes. */
 export interface VerifyDeterminismResponse {
   ok: boolean;
   deterministic: boolean;
@@ -546,6 +554,8 @@ export interface ListRunsParams {
  *  for the full sealed manifest. */
 export interface RunSummary {
   id: number;
+  /** The key that requested the run. */
+  api_key_id?: number;
   created_at: string;
   program_id: Hex64;
   route_id: string;
@@ -585,6 +595,9 @@ export interface ExportRunsParams {
 /** One run in an evidence export: what the server stored, not a verdict. */
 export interface ExportRow {
   run_id: number;
+  /** The key that requested the run, so an account's export can be
+   *  grouped by key. */
+  api_key_id?: number;
   created_at: string;
   status: RunStatus;
   error_stage: string;
@@ -615,6 +628,22 @@ export interface RunsExport {
   /** Rows returned, counted by status. */
   by_status: Record<string, number>;
   runs: ExportRow[];
+  /** The key's policy documents, when it has loaded any. */
+  policy_documents?: PolicyWithDocument[];
+  /** The key's policy changes, oldest first, when it has loaded any. */
+  policy_history?: PolicyActivation[];
+  /** The key's account, as `account-N`. */
+  account_id?: string;
+  /** The account's policy documents, when it has loaded any. */
+  account_policy_documents?: PolicyWithDocument[];
+  /** The account's policy changes, oldest first, when it has loaded any. */
+  account_policy_history?: PolicyActivation[];
+}
+
+/** Returned by {@link VerdifaxClient.exportAccountRuns}: the runs of every
+ *  key in the account, with the account's policy documents and changes. */
+export interface AccountRunsExport extends RunsExport {
+  account_id: string;
 }
 
 /** Returned by {@link VerdifaxClient.exportRunsCSV}. */
@@ -713,6 +742,106 @@ export interface AdminCreateKeyResponse {
   name: string;
   secret: string;
   hint: string;
+  /** The key's account, as `account-N`. */
+  account_id?: string;
+}
+
+/** Options for {@link VerdifaxClient.adminCreateKey}. */
+export interface AdminCreateKeyOptions {
+  /** Puts the customer key in this existing account, by its number. Without
+   *  it the key gets an account of its own. A key never changes account. */
+  accountId?: number;
+}
+
+// ── Accounts ────────────────────────────────────────────────────
+
+/** A key's tier. */
+export type KeyTier = "trial" | "production";
+
+/** An account, a company on Verdifax, as GET /admin/accounts lists it. The
+ *  account number is a label Verdifax assigned, not a verified company
+ *  identity. */
+export interface Account {
+  /** `account-N`, as records seal it. */
+  account_id: string;
+  id: number;
+  name: string;
+  tier: string;
+  created_at: string;
+  /** Member keys not revoked. */
+  member_keys: number;
+  /** Owner keys not revoked. */
+  owner_keys: number;
+  /** The chain of the account's policy changes, `account-N`. */
+  chain_id: string;
+  identity?: string;
+  policy_scope?: string;
+}
+
+/** Returned by {@link VerdifaxClient.getAccount}. */
+export interface AccountInfo extends Account {
+  ok: boolean;
+}
+
+/** One of an account's keys, without its secret. */
+export interface AccountKey {
+  id: number;
+  name: string;
+  account_id: string;
+  /** True for an owner key, which manages the account and cannot run
+   *  anything. */
+  owner: boolean;
+  tier: string;
+  created_at: string;
+  last_used_at: string;
+  run_count: number;
+  revoked: boolean;
+  expires_at?: string;
+}
+
+/** Returned by {@link VerdifaxClient.listAccountKeys}. */
+export interface AccountKeyList {
+  ok: boolean;
+  account_id: string;
+  keys: AccountKey[];
+}
+
+/** A new key with its secret, which is shown this once. */
+export interface CreatedAccountKey extends AccountKey {
+  ok: boolean;
+  secret: string;
+  /** True when the key needs a request key before it can run. */
+  request_key_required: boolean;
+  hint: string;
+}
+
+/** Returned by {@link VerdifaxClient.revokeAccountKey}. */
+export interface AccountKeyRevocation {
+  ok: boolean;
+  id: number;
+  revoked: boolean;
+}
+
+/** Options for {@link VerdifaxClient.createAccountKey}. */
+export interface CreateAccountKeyOptions {
+  /** RFC 3339 or YYYY-MM-DD. */
+  expiresAt?: string;
+}
+
+/** Options for {@link VerdifaxClient.adminCreateAccount}. */
+export interface AdminCreateAccountOptions {
+  /** `trial` when left out. */
+  tier?: KeyTier;
+  /** When the owner key expires: RFC 3339 or YYYY-MM-DD. */
+  expiresAt?: string;
+}
+
+/** Returned by {@link VerdifaxClient.adminCreateAccount}: the account and
+ *  its first owner key, with the secret. */
+export interface AdminCreateAccountResponse {
+  ok: boolean;
+  account: Account;
+  owner_key: CreatedAccountKey;
 }
 
 /** Projection returned by {@link VerdifaxClient.adminListKeys}.

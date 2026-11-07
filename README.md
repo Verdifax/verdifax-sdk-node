@@ -90,10 +90,27 @@ if (v.verified) {
 | `client.testPolicy({ inputs, document?, documentHash? })` | `POST /policies/test` | required |
 | `client.getPolicyHistory()` | `GET /policies/history` | required |
 | `client.activatePolicy(documentHash)` | `POST /policies/{document_hash}/activate` | required |
-| `client.adminCreateKey(name)` | `POST /admin/keys` | admin |
+| `client.getAccount()` | `GET /account` | owner key |
+| `client.createAccountKey(name, { expiresAt? })` | `POST /account/keys` | owner key |
+| `client.listAccountKeys()` | `GET /account/keys` | owner key |
+| `client.revokeAccountKey(id)` | `DELETE /account/keys/{id}` | owner key |
+| `client.registerAccountRequestKey()` | `POST /account/request-key` | owner key |
+| `client.clearAccountRequestKey()` | `DELETE /account/request-key` | owner key |
+| `client.listAccountRuns(params)` | `GET /account/runs` | owner key |
+| `client.exportAccountRuns(params)` | `GET /account/runs/export` | owner key |
+| `client.exportAccountRunsCSV(params)` | `GET /account/runs/export?format=csv` | owner key |
+| `client.uploadAccountPolicy(document)` | `POST /account/policies` | owner key |
+| `client.listAccountPolicies()` | `GET /account/policies` | owner key |
+| `client.getAccountPolicy(documentHash)` | `GET /account/policies/{document_hash}` | owner key |
+| `client.testAccountPolicy({ inputs, document?, documentHash? })` | `POST /account/policies/test` | owner key |
+| `client.getAccountPolicyHistory()` | `GET /account/policies/history` | owner key |
+| `client.activateAccountPolicy(documentHash)` | `POST /account/policies/{document_hash}/activate` | owner key |
+| `client.adminCreateKey(name, { accountId? })` | `POST /admin/keys` | admin |
 | `client.adminListKeys()` | `GET /admin/keys` | admin |
 | `client.adminRevokeKey(id)` | `DELETE /admin/keys/{id}` | admin |
 | `client.adminClearRequestKey(id)` | `DELETE /admin/keys/{id}/request-key` | admin |
+| `client.adminCreateAccount(name, { tier?, expiresAt? })` | `POST /admin/accounts` | admin |
+| `client.adminListAccounts()` | `GET /admin/accounts` | admin |
 | `client.adminErase(req)` | `POST /admin/erase` | admin |
 
 `client.job(jobId)` returns a [job helper](#jobs) and makes no request until a step runs.
@@ -104,7 +121,7 @@ These functions make no request: `captureEnvironment`, `formatProviderPayload`, 
 
 ## Versioning
 
-From 1.0, a breaking change needs a new major version.
+From 1.0, a breaking change needs a new major version. See [CHANGELOG.md](CHANGELOG.md) for what each release added.
 
 ## Settings
 
@@ -231,6 +248,50 @@ Verdifax did not write, review or approve your policy. A pass means the rules ra
 A policy judges what you declared. It cannot show the declared facts are true.
 
 A refusal stops the action only if your system waits for the answer.
+
+## Accounts
+
+An account is a company on Verdifax. Every API key belongs to one account for life. An account has an owner key, which manages the account: it creates and revokes the member keys, sets the account policy and reads the account's runs. The member keys are the keys that run things.
+
+```typescript
+import { readFileSync, writeFileSync } from "node:fs";
+import { VerdifaxClient, generateRequestKeyPair } from "verdifax";
+
+// Verdifax creates the account and its first owner key.
+const admin = new VerdifaxClient({ apiKey: process.env.VERDIFAX_ADMIN_KEY! });
+const { account, owner_key } = await admin.adminCreateAccount("Acme", { tier: "production" });
+console.log(account.account_id, owner_key.secret); // the secret is shown once
+
+// The owner registers a request key, which must sign every account policy change.
+const { privateKey } = generateRequestKeyPair();
+const owner = new VerdifaxClient({ apiKey: owner_key.secret, signingKey: privateKey });
+await owner.registerAccountRequestKey();
+
+// The owner creates member keys. Each one stays in the account for life.
+const member = await owner.createAccountKey("loan-bot");
+console.log(member.id, member.secret); // the secret is shown once
+
+// The owner loads, tests and activates the account policy, signed by its request key.
+const stored = await owner.uploadAccountPolicy(readFileSync("account-policy.json", "utf8"));
+await owner.testAccountPolicy({ documentHash: stored.document_hash, inputs: { verb: "approve-loan" } });
+await owner.activateAccountPolicy(stored.document_hash);
+
+// The owner exports the runs of every key in the account, with the account policy and its changes.
+const evidence = await owner.exportAccountRuns({ from: "2026-11-01T00:00:00Z", to: "2026-12-01T00:00:00Z" });
+writeFileSync("account-runs.json", JSON.stringify(evidence));
+```
+
+An owner key cannot run anything. Every route that needs a key refuses it, apart from the `/account` routes, so give the member keys to the systems that run things.
+
+The account number, such as `account-7`, is a label Verdifax assigned. It is not a verified company identity.
+
+An account policy is the customer's own. Verdifax did not write, review or approve it. Every key in the account must pass the account policy on top of its own policy, and a run is admitted only when both allow it.
+
+The account's view covers the runs its keys made through Verdifax. It does not cover runs made elsewhere.
+
+`activateAccountPolicy` reads `listAccountPolicies` first, names the newest change as the one it follows and signs the change over the account's chain, `account-N`, with the same signature `activatePolicy` uses. The server refuses an unsigned account policy change, so `activateAccountPolicy` needs the `signingKey` option, set to the owner key's registered request key, and refuses before sending anything without it. It also refuses a `chain_id` that is not of the form `account-N`. The other account policy methods take and return what the matching key policy methods do. `getAccountPolicyHistory` returns the account's changes oldest first, in the form `verdifax-verify --policy-history FILE` reads.
+
+`exportAccountRuns` and `exportAccountRunsCSV` take the same period and `job_id` as `exportRuns` and check the CSV counts the same way. The JSON form also carries `account_id`, and `account_policy_documents` and `account_policy_history` once the account has loaded a policy. `listAccountRuns` pages like `listRuns`. `revokeAccountKey` revokes a member key, and a key in another account, or an owner key, throws `NotFoundError`. `adminCreateKey(name, { accountId })` puts a new customer key in an existing account, by its number.
 
 ## Evidence export
 
