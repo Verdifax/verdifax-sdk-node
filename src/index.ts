@@ -13,7 +13,7 @@ export { MAX_BATCH_ROWS, VerdifaxClient } from "./client.js";
 export { VerdifaxJob } from "./job.js";
 export { fromEnv } from "./config.js";
 export { captureEnvironment } from "./environment.js";
-export { formatProviderPayload } from "./helpers.js";
+export { EXECUTE_FIELDS, formatProviderPayload } from "./helpers.js";
 export { RUN_STATUSES } from "./types.js";
 export {
   CRES_ENGINE_VERSION,
@@ -26,6 +26,8 @@ export {
 } from "./section0.js";
 export {
   generateRequestKeyPair,
+  policyActivationApproval,
+  policyActivationPreimage,
   requestKeyChangeApproval,
   requestKeyChangePreimage,
   requestKeyRegistrationBody,
@@ -75,6 +77,17 @@ export type {
   ListAttestationsParams,
   ListRunsParams,
   PDFFormat,
+  Policy,
+  PolicyActivation,
+  PolicyActivationSignature,
+  PolicyActorType,
+  PolicyClassification,
+  PolicyContext,
+  PolicyList,
+  PolicyObjectType,
+  PolicyTestRequest,
+  PolicyTestResult,
+  PolicyWithDocument,
   RequestKeyChange,
   RequestKeyPair,
   RequestKeyRegistration,

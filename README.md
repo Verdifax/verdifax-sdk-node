@@ -84,6 +84,12 @@ if (v.verified) {
 | `client.registerRequestKey()` | `POST /keys/request-key` | required |
 | `client.rotateRequestKey(newSigningKey)` | `POST /keys/request-key` | required |
 | `client.clearRequestKey()` | `DELETE /keys/request-key` | required |
+| `client.uploadPolicy(document)` | `POST /policies` | required |
+| `client.listPolicies()` | `GET /policies` | required |
+| `client.getPolicy(documentHash)` | `GET /policies/{document_hash}` | required |
+| `client.testPolicy({ inputs, document?, documentHash? })` | `POST /policies/test` | required |
+| `client.getPolicyHistory()` | `GET /policies/history` | required |
+| `client.activatePolicy(documentHash)` | `POST /policies/{document_hash}/activate` | required |
 | `client.adminCreateKey(name)` | `POST /admin/keys` | admin |
 | `client.adminListKeys()` | `GET /admin/keys` | admin |
 | `client.adminRevokeKey(id)` | `DELETE /admin/keys/{id}` | admin |
@@ -92,7 +98,7 @@ if (v.verified) {
 
 `client.job(jobId)` returns a [job helper](#jobs) and makes no request until a step runs.
 
-These functions make no request: `captureEnvironment`, `formatProviderPayload`, `signRequest`, `signRequestV2`, `requestKeyRegistrationBody`, `requestKeyChangeApproval`, `requestKeyChangePreimage`, `requestSignaturePreimage`, `requestSignaturePreimageV2`, `generateRequestKeyPair`, `validateHex64`, `validateJobName`, `validateRouteId`, `dseDispatchHash`, `dcaeClosureHash` and `cresReceiptHash`. `RUN_STATUSES` lists every run status the server uses.
+These functions make no request: `captureEnvironment`, `formatProviderPayload`, `signRequest`, `signRequestV2`, `requestKeyRegistrationBody`, `requestKeyChangeApproval`, `requestKeyChangePreimage`, `policyActivationApproval`, `policyActivationPreimage`, `requestSignaturePreimage`, `requestSignaturePreimageV2`, `generateRequestKeyPair`, `validateHex64`, `validateJobName`, `validateRouteId`, `dseDispatchHash`, `dcaeClosureHash` and `cresReceiptHash`. `RUN_STATUSES` lists every run status the server uses, and `EXECUTE_FIELDS` lists every top-level key a run request may hold.
 
 `getRunArtifacts`, `getPublicBundle` and `getPublicBundleByToken` return the exact JSON text the server sent, so you can save it and check it with `verdifax-verify`.
 
@@ -170,6 +176,62 @@ The server refuses a step in a closed job, a repeated step id, and a final step 
 
 A job map covers what was sent. It cannot show a step that was never sent.
 
+## Policies
+
+A policy is your own set of rules that decides whether a run is allowed or refused, from the facts the run declares. You upload its exact text, test it on sample inputs, then activate it. Each change is one more link in a chain of changes on the public log.
+
+```typescript
+import { readFileSync, writeFileSync } from "node:fs";
+
+// Upload the exact text. Nothing changes until it is activated.
+const stored = await client.uploadPolicy(readFileSync("policy.json", "utf8"));
+
+// See which rule would fire on sample inputs. This seals nothing.
+const trial = await client.testPolicy({
+  documentHash: stored.document_hash,
+  inputs: { subject_type: "agent", verb: "approve-loan", object_type: "transaction", classification: "CONFIDENTIAL" },
+});
+console.log(trial.outcome, trial.fired_rule_id, trial.reason_code);
+
+// Make it the policy in force. With a signingKey the request key signs the change.
+const change = await client.activatePolicy(stored.document_hash);
+
+// A run declares the facts the rules read, and can name the policy it expects.
+await client.attest({
+  program_id,
+  route_id,
+  registry_record_hash,
+  payload_text: "approve loan 1042",
+  attested_context: { actor_id: "agent:loan-bot" },
+  policy_context: {
+    actor_type: "agent",
+    mfa_satisfied: true,
+    object_type: "transaction",
+    object_id: "loan-1042",
+    classification: "CONFIDENTIAL",
+  },
+  expected_policy_hash: change.policy_hash,
+});
+
+// Roll back by activating an earlier document.
+await client.activatePolicy(earlierDocumentHash);
+
+// Save the chain of changes and check it with verdifax-verify --policy-history policy-history.json.
+writeFileSync("policy-history.json", JSON.stringify(await client.getPolicyHistory()));
+```
+
+`uploadPolicy` sends the string it is given unchanged, because the server hashes the exact text, and it refuses anything that is not a string. `getPolicy` returns a stored document with its exact text. `testPolicy` takes exactly one of `document` and `documentHash`. `listPolicies` returns the documents, `chain_id`, the newest change as `newest_activation_hash` (64 zeros when there is none yet) and the document in force as `active_document_hash` (empty under the built-in policy).
+
+`activatePolicy` reads `listPolicies` first and names the newest change as the one it follows. With the `signingKey` option it sends the request key's signature over the chain, the document and that change, which the server requires while a request key is registered. Rolling back is activating an earlier document: it is one more change, so the change it undoes stays on the record. An HTTP 409 means another change came first or the document is not yet effective. It throws the usual `APIError` and is not retried. `getPolicyHistory` returns the changes oldest first, in the form `verdifax-verify --policy-history FILE` reads.
+
+`execute`, `attest`, each row of `executeBatch`, `verifyDeterminism`, `job.step` and the provider helpers take `policy_context` and `expected_policy_hash`. `policy_context` holds only `actor_type` (`agent`, `user`, `service` or `system`), `mfa_satisfied` (true or false), `session_age_seconds` (a whole number, not negative), `object_type` (`text`, `transaction`, `code`, `data`, `model` or `file`), `object_id` (at most 256 bytes) and `classification` (`PUBLIC`, `INTERNAL`, `CONFIDENTIAL`, `RESTRICTED`, `TOP_SECRET` or `TS_SCI`). Any other key or value is refused before sending, because a misspelt key would be dropped and a rule on it would read its zero value. `actor_type`, `mfa_satisfied` and `session_age_seconds` describe the attested actor, so a run that sets one of them must also send `attested_context` with the actor, such as its `actor_id`. `expected_policy_hash` is 64 lowercase hex characters: when another policy is active the server refuses the run with HTTP 409. Both fields are inside `signed_request` on a signed client.
+
+Verdifax did not write, review or approve your policy. A pass means the rules ran, not that they are good rules.
+
+A policy judges what you declared. It cannot show the declared facts are true.
+
+A refusal stops the action only if your system waits for the answer.
+
 ## Evidence export
 
 `exportRuns` lists the runs the server holds for your key in a period, failures included, with up to 10,000 rows per export. `exportRunsCSV` returns the same rows as raw CSV text.
@@ -212,6 +274,8 @@ Both helpers take the same optional `job` block as `attest` and return `record_h
 ## Optional execute fields
 
 `execute`, `attest`, `executeBatch` and `verifyDeterminism` accept `attested_context`, `reproducibility_context`, `request_substance`, `authorization_chain`, `regulatory_scaffolding` and `causal_graph`. Each is recorded as supplied and Verdifax does not check it. The client derives `attested` and `declared` from the fields you provide. Leave out `request_substance.origin.source_ip_hash` and `user_agent_hash`: the server computes them. `execute`, `attest` and `verifyDeterminism` refuse them before sending, and a batch row that sets them fails in `results`.
+
+The server ignores a key it does not know, so a misspelt field would be dropped with no error. The client refuses it instead, before sending: a run request for `execute`, `attest`, `verifyDeterminism`, `job.step` or a row of `executeBatch` with a top-level key outside `EXECUTE_FIELDS`, or an `attested_context` key outside `attested`, `actor_id`, `actor_role`, `authorization_policy`, `actor_signature`, `model_provider`, `model_name`, `model_version`, `model_temperature`, `prompt_hash`, `decision_kind`, `decision_result` and `decision_note`, throws a `VerdifaxError` naming the key. `attest` also refuses `request_signature` and `signed_request`, which it does not send. `attestClaudeResponse` and `attestOpenAIResponse` accept their own argument names and every name in `EXECUTE_FIELDS`, so a run request spread into the arguments keeps working, and refuse any other key the same way. Responses are not checked this way: a field a newer server adds is kept and does not throw.
 
 `execute`, `attest` and `verifyDeterminism` check that `program_id` and `registry_record_hash` are 64 lowercase hex characters and that `route_id` is 1 to 256 printable ASCII characters.
 

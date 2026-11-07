@@ -22,6 +22,7 @@ import { withExecuteFlags } from "./helpers.js";
 import type {
   ExecuteRequest,
   JobLink,
+  PolicyActivationSignature,
   RequestKeyChange,
   RequestKeyPair,
   RequestKeyRegistrationBody,
@@ -35,6 +36,7 @@ const REQUEST_SIGNATURE_VERSION_2 = "2";
 const JOB_FORM = "verdifax.job.v1";
 const REQUEST_KEY_PROOF_FORM = "verdifax.request-key.v1";
 const REQUEST_KEY_CHANGE_FORM = "verdifax.request-key-change.v1";
+const POLICY_ACTIVATION_FORM = "verdifax.policy-activation.v1";
 const SIGNING_KEY_BYTES = 32;
 
 // DER header of a PKCS#8 Ed25519 private key. The 32 raw key bytes follow.
@@ -267,6 +269,60 @@ export function requestKeyChangeApproval(
   const nonce = options.nonce ?? randomBytes(16).toString("hex");
   const preimage = requestKeyChangePreimage({
     new_public_key: newPublicKey,
+    signed_at,
+    nonce,
+  });
+  return {
+    signature: sign(null, preimage, key).toString("base64"),
+    signed_at,
+    nonce,
+  };
+}
+
+/** The bytes the request key signs to make a stored policy document the
+ *  one in force, matching the orchestrator's PolicyActivationPreimage.
+ *  `chain_id` and `previous_activation_hash` come from GET /policies, so a
+ *  signature cannot be used on another key's chain, another document or
+ *  another point in the chain. */
+export function policyActivationPreimage(fields: {
+  chain_id: string;
+  document_hash: string;
+  previous_activation_hash: string;
+  signed_at: string;
+  nonce: string;
+}): Buffer {
+  return Buffer.from(
+    [
+      POLICY_ACTIVATION_FORM,
+      fields.chain_id,
+      fields.document_hash,
+      fields.previous_activation_hash,
+      fields.signed_at,
+      fields.nonce,
+    ].join("\0"),
+    "utf8",
+  );
+}
+
+/** The request key's approval of a policy change, the `signature` value of
+ *  POST /policies/{document_hash}/activate. `signedAt` and `nonce` default
+ *  to the current time and fresh random bytes. */
+export function policyActivationApproval(
+  signingKey: Uint8Array | KeyObject,
+  fields: {
+    chain_id: string;
+    document_hash: string;
+    previous_activation_hash: string;
+  },
+  options: { signedAt?: string; nonce?: string } = {},
+): PolicyActivationSignature {
+  const key = loadSigningKey(signingKey);
+  const signed_at = options.signedAt ?? signedAtNow();
+  const nonce = options.nonce ?? randomBytes(16).toString("hex");
+  const preimage = policyActivationPreimage({
+    chain_id: fields.chain_id,
+    document_hash: fields.document_hash,
+    previous_activation_hash: fields.previous_activation_hash,
     signed_at,
     nonce,
   });

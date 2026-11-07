@@ -3,8 +3,13 @@
  */
 
 import { VerdifaxError } from "./errors.js";
-import type { ExecuteRequest, JobLink, ReproducibilityContext } from "./types.js";
-import { validateJobName } from "./validation.js";
+import type {
+  ExecuteRequest,
+  JobLink,
+  PolicyContext,
+  ReproducibilityContext,
+} from "./types.js";
+import { validateHex64, validateJobName } from "./validation.js";
 
 /**
  * The payload the provider helpers attest: canonical JSON with sorted keys,
@@ -122,9 +127,188 @@ export function normalizedJob(job: JobLink): JobLink {
   return out;
 }
 
-/** The request with its derived flags set and its job block normalized,
- *  on a copy. */
+const POLICY_ACTOR_TYPES = ["agent", "user", "service", "system"];
+const POLICY_OBJECT_TYPES = ["text", "transaction", "code", "data", "model", "file"];
+const POLICY_CLASSIFICATIONS = [
+  "PUBLIC",
+  "INTERNAL",
+  "CONFIDENTIAL",
+  "RESTRICTED",
+  "TOP_SECRET",
+  "TS_SCI",
+];
+const MAX_POLICY_OBJECT_ID_BYTES = 256;
+
+// A Record, so the compiler fails here if PolicyContext gains a field.
+const POLICY_CONTEXT_FIELDS: Record<keyof PolicyContext, true> = {
+  actor_type: true,
+  mfa_satisfied: true,
+  session_age_seconds: true,
+  object_type: true,
+  object_id: true,
+  classification: true,
+};
+
+function refuseOutsideList(
+  value: unknown,
+  allowed: readonly string[],
+  fieldName: string,
+): void {
+  if (typeof value !== "string" || !allowed.includes(value)) {
+    throw new VerdifaxError(
+      `verdifax: policy_context.${fieldName} must be one of ${allowed.join(", ")}`,
+    );
+  }
+}
+
+/** The policy_context block, checked the way the server checks it: an
+ *  unknown key or a value no rule could read is refused, because a
+ *  misspelt key would be dropped and a rule on it would read its zero
+ *  value. A key set to undefined counts as left out. Returns a copy. */
+export function checkedPolicyContext(context: PolicyContext): PolicyContext {
+  if (typeof context !== "object" || context === null || Array.isArray(context)) {
+    throw new VerdifaxError("verdifax: policy_context must be an object");
+  }
+  refuseUnknownFields(context, POLICY_CONTEXT_FIELDS, "policy_context");
+  const out: PolicyContext = {};
+  const {
+    actor_type,
+    mfa_satisfied,
+    session_age_seconds,
+    object_type,
+    object_id,
+    classification,
+  } = context;
+  if (actor_type !== undefined) {
+    refuseOutsideList(actor_type, POLICY_ACTOR_TYPES, "actor_type");
+    out.actor_type = actor_type;
+  }
+  if (mfa_satisfied !== undefined) {
+    if (typeof mfa_satisfied !== "boolean") {
+      throw new VerdifaxError(
+        "verdifax: policy_context.mfa_satisfied must be true or false",
+      );
+    }
+    out.mfa_satisfied = mfa_satisfied;
+  }
+  if (session_age_seconds !== undefined) {
+    if (!Number.isSafeInteger(session_age_seconds) || session_age_seconds < 0) {
+      throw new VerdifaxError(
+        "verdifax: policy_context.session_age_seconds must be a whole number of seconds, not negative",
+      );
+    }
+    out.session_age_seconds = session_age_seconds;
+  }
+  if (object_type !== undefined) {
+    refuseOutsideList(object_type, POLICY_OBJECT_TYPES, "object_type");
+    out.object_type = object_type;
+  }
+  if (object_id !== undefined) {
+    if (typeof object_id !== "string") {
+      throw new VerdifaxError("verdifax: policy_context.object_id must be a string");
+    }
+    if (Buffer.byteLength(object_id, "utf8") > MAX_POLICY_OBJECT_ID_BYTES) {
+      throw new VerdifaxError(
+        `verdifax: policy_context.object_id is longer than ${MAX_POLICY_OBJECT_ID_BYTES} bytes`,
+      );
+    }
+    out.object_id = object_id;
+  }
+  if (classification !== undefined) {
+    refuseOutsideList(classification, POLICY_CLASSIFICATIONS, "classification");
+    out.classification = classification;
+  }
+  return out;
+}
+
+/** The server reads actor_type, mfa_satisfied and session_age_seconds only
+ *  for an attested actor and refuses them without one, so this refuses
+ *  them first: without an attested actor a rule on them would read their
+ *  zero values. Like the server, a false mfa_satisfied and a zero
+ *  session_age_seconds are not checked. `attested` is the block with the
+ *  flag the client derived. */
+function refuseActorFactsWithoutActor(
+  context: PolicyContext,
+  attested: Record<string, unknown> | undefined,
+): void {
+  const declaresActor =
+    context.actor_type !== undefined ||
+    context.mfa_satisfied === true ||
+    (context.session_age_seconds ?? 0) !== 0;
+  if (declaresActor && attested?.attested !== true) {
+    throw new VerdifaxError(
+      "verdifax: policy_context.actor_type, mfa_satisfied and session_age_seconds describe the attested actor; send attested_context with the actor, for example its actor_id",
+    );
+  }
+}
+
+// Every top-level key of a run request, the same list as execute_fields in
+// scripts/sdk-parity.json, which a test holds it to. The server ignores a
+// key it does not know, so a misspelt one would be dropped with no error.
+// A Record, so the compiler fails here if ExecuteRequest gains a field.
+const EXECUTE_FIELD_SET: Record<keyof ExecuteRequest | "signed_request", true> = {
+  payload: true,
+  payload_text: true,
+  program_id: true,
+  route_id: true,
+  registry_record_hash: true,
+  ai_output_text: true,
+  attested_context: true,
+  reproducibility_context: true,
+  request_substance: true,
+  authorization_chain: true,
+  regulatory_scaffolding: true,
+  causal_graph: true,
+  request_signature: true,
+  signed_request: true,
+  job: true,
+  policy_context: true,
+  expected_policy_hash: true,
+};
+
+/** Every top-level key a run request may hold. Any other key is refused
+ *  before sending, so a misspelt field cannot be silently dropped. */
+export const EXECUTE_FIELDS: readonly string[] = Object.freeze(
+  Object.keys(EXECUTE_FIELD_SET),
+);
+
+// Every key the server reads in attested_context.
+const ATTESTED_CONTEXT_FIELDS: Record<string, true> = {
+  attested: true,
+  actor_id: true,
+  actor_role: true,
+  authorization_policy: true,
+  actor_signature: true,
+  model_provider: true,
+  model_name: true,
+  model_version: true,
+  model_temperature: true,
+  prompt_hash: true,
+  decision_kind: true,
+  decision_result: true,
+  decision_note: true,
+};
+
+/** Throws on a top-level key outside {@link EXECUTE_FIELDS} or an
+ *  attested_context key the server does not read. */
+export function refuseUnknownRequestFields(req: object, label = "request"): void {
+  if (typeof req !== "object" || req === null || Array.isArray(req)) {
+    throw new VerdifaxError(`verdifax: ${label} must be an object`);
+  }
+  refuseUnknownFields(req, EXECUTE_FIELD_SET, label);
+  const context = (req as ExecuteRequest).attested_context;
+  if (typeof context === "object" && context !== null) {
+    refuseUnknownFields(context, ATTESTED_CONTEXT_FIELDS, "attested_context");
+  }
+}
+
+/** The request with its derived flags set, its job block normalized and
+ *  its policy fields checked, on a copy. A key outside
+ *  {@link EXECUTE_FIELDS} or an unknown attested_context key is refused. A
+ *  null or undefined job, policy_context or expected_policy_hash is left
+ *  out. */
 export function withExecuteFlags(req: ExecuteRequest): ExecuteRequest {
+  refuseUnknownRequestFields(req);
   const body = { ...req };
   if (req.job === undefined || req.job === null) {
     delete body.job;
@@ -136,6 +320,17 @@ export function withExecuteFlags(req: ExecuteRequest): ExecuteRequest {
   }
   if (req.reproducibility_context) {
     body.reproducibility_context = withDeclaredFlag(req.reproducibility_context);
+  }
+  if (req.policy_context === undefined || req.policy_context === null) {
+    delete body.policy_context;
+  } else {
+    body.policy_context = checkedPolicyContext(req.policy_context);
+    refuseActorFactsWithoutActor(body.policy_context, body.attested_context);
+  }
+  if (req.expected_policy_hash === undefined || req.expected_policy_hash === null) {
+    delete body.expected_policy_hash;
+  } else {
+    validateHex64(req.expected_policy_hash, "expected_policy_hash");
   }
   return body;
 }

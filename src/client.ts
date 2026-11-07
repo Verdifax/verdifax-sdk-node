@@ -7,13 +7,17 @@ import {
 } from "./errors.js";
 import {
   loadSigningKey,
+  policyActivationApproval,
   requestKeyChangeApproval,
   requestKeyRegistrationBody,
   signRequestV2,
 } from "./signing.js";
 import {
+  EXECUTE_FIELDS,
   formatProviderPayload,
   refuseCallerOriginHashes,
+  refuseUnknownFields,
+  refuseUnknownRequestFields,
   withExecuteFlags,
 } from "./helpers.js";
 import { VerdifaxJob } from "./job.js";
@@ -37,6 +41,14 @@ import type {
   ListAttestationsParams,
   ListRunsParams,
   PDFFormat,
+  Policy,
+  PolicyActivation,
+  PolicyActivationSignature,
+  PolicyContext,
+  PolicyList,
+  PolicyTestRequest,
+  PolicyTestResult,
+  PolicyWithDocument,
   RequestKeyRegistration,
   Run,
   RunsExport,
@@ -64,6 +76,7 @@ const DEFAULT_RETRY_BASE_DELAY_MS = 200;
 const SDK_USER_AGENT = `verdifax-sdk-node/${SDK_VERSION}`;
 const HEADER_API_KEY = "X-Verdifax-Key";
 const REQUEST_KEY_PATH = "/keys/request-key";
+const POLICIES_PATH = "/policies";
 
 const HEADER_EXPORT_TOTAL = "X-Verdifax-Total";
 const HEADER_EXPORT_TRUNCATED = "X-Verdifax-Truncated";
@@ -72,6 +85,44 @@ const RETRYABLE_STATUSES = new Set([429, 502, 503, 504]);
 
 /** The most rows POST /execute/batch accepts in one request. */
 export const MAX_BATCH_ROWS = 1000;
+
+// attest copies named fields only, so a key outside these would vanish.
+// A Record, so the compiler fails here if AttestRequest gains a field.
+const ATTEST_FIELDS: Record<keyof AttestRequest, true> = {
+  payload: true,
+  payload_text: true,
+  program_id: true,
+  route_id: true,
+  registry_record_hash: true,
+  ai_output_text: true,
+  attested_context: true,
+  reproducibility_context: true,
+  request_substance: true,
+  authorization_chain: true,
+  regulatory_scaffolding: true,
+  causal_graph: true,
+  job: true,
+  policy_context: true,
+  expected_policy_hash: true,
+};
+
+// The provider helpers copy named arguments only, so a key outside their own
+// names and EXECUTE_FIELDS is refused. The execute fields stay accepted, so a
+// run request spread into the arguments keeps working as it always has.
+const PROVIDER_ARGS: Record<string, true> = Object.fromEntries(
+  [
+    "program_id",
+    "route_id",
+    "registry_record_hash",
+    "prompt",
+    "response",
+    "govern",
+    "job",
+    "policy_context",
+    "expected_policy_hash",
+    ...EXECUTE_FIELDS,
+  ].map((name) => [name, true]),
+);
 
 /** A response body kept as sent, with its headers. */
 interface RawResponse {
@@ -126,6 +177,12 @@ interface RawResponse {
  * | `registerRequestKey()` | POST /keys/request-key | required |
  * | `rotateRequestKey(newSigningKey)` | POST /keys/request-key | required |
  * | `clearRequestKey()` | DELETE /keys/request-key | required |
+ * | `uploadPolicy(document)` | POST /policies | required |
+ * | `listPolicies()` | GET /policies | required |
+ * | `getPolicy(documentHash)` | GET /policies/{document_hash} | required |
+ * | `testPolicy(req)` | POST /policies/test | required |
+ * | `getPolicyHistory()` | GET /policies/history | required |
+ * | `activatePolicy(documentHash)` | POST /policies/{document_hash}/activate | required |
  * | `job(jobId)` | none, returns a {@link VerdifaxJob} | none |
  *
  * With the `signingKey` option set, every path to POST /execute carries
@@ -189,6 +246,7 @@ export class VerdifaxClient {
   // ── Execute / Attest (auth) ───────────────────────────────────
 
   async execute(req: ExecuteRequest): Promise<ExecuteResponse> {
+    refuseUnknownRequestFields(req);
     this.requireExecuteFields(req);
     const sent = this.prepared(req);
     const out = await this.request<ExecuteResponse>("POST", "/execute", sent);
@@ -202,6 +260,7 @@ export class VerdifaxClient {
   async verifyDeterminism(
     req: ExecuteRequest,
   ): Promise<VerifyDeterminismResponse> {
+    refuseUnknownRequestFields(req);
     this.requireExecuteFields(req);
     if (req.job !== undefined && req.job !== null) {
       throw new VerdifaxError(
@@ -221,8 +280,9 @@ export class VerdifaxClient {
    *  signing key each row carries its own signature and nonce. A row
    *  that fails comes back in `results` with `ok: false`, so the call
    *  does not throw for it. The rows are not checked here, except a job
-   *  block, which is refused before anything is sent: the server reports
-   *  any other bad row in that row's result.
+   *  block, a `policy_context` and an `expected_policy_hash`, which are
+   *  refused before anything is sent: the server reports any other bad row
+   *  in that row's result.
    *
    *  This is one POST and it is never retried. After a timeout the
    *  server may have run some or all of the rows. */
@@ -236,6 +296,7 @@ export class VerdifaxClient {
         `verdifax: executeBatch accepts at most ${MAX_BATCH_ROWS} runs (got ${runs.length})`,
       );
     }
+    runs.forEach((run, i) => refuseUnknownRequestFields(run, `runs[${i}]`));
     const sent = runs.map((run) => this.prepared(run));
     const out = await this.request<ExecuteBatchResponse>(
       "POST",
@@ -257,6 +318,8 @@ export class VerdifaxClient {
    *  routes the call through to the canonical /execute. */
   async attest(req: AttestRequest): Promise<ExecuteResponse> {
     this.requireAPIKey();
+    refuseUnknownRequestFields(req, "attest request");
+    refuseUnknownFields(req, ATTEST_FIELDS, "attest request");
     if (req.payload !== undefined && req.payload_text !== undefined) {
       throw new VerdifaxError(
         "verdifax: attest accepts payload OR payload_text, not both",
@@ -283,6 +346,8 @@ export class VerdifaxClient {
       regulatory_scaffolding: req.regulatory_scaffolding,
       causal_graph: req.causal_graph,
       job: req.job,
+      policy_context: req.policy_context,
+      expected_policy_hash: req.expected_policy_hash,
     };
     if (req.payload !== undefined) {
       body.payload = Buffer.isBuffer(req.payload)
@@ -367,6 +432,130 @@ export class VerdifaxClient {
         : undefined,
     );
     this.signingKey = undefined;
+  }
+
+  // ── Policies (auth) ──────────────────────────────────────────
+
+  /** Stores a policy document. Nothing changes until it is activated with
+   *  {@link activatePolicy}. The server hashes the exact text, so this
+   *  sends the string it is given unchanged and refuses anything that is
+   *  not a string: serializing an object here would change the hash.
+   *  Verdifax does not write, review or approve a customer's policy. */
+  async uploadPolicy(document: string): Promise<Policy> {
+    this.requireAPIKey();
+    if (typeof document !== "string") {
+      throw new VerdifaxError(
+        "verdifax: document must be the policy's exact text, as a string",
+      );
+    }
+    return this.request<Policy>("POST", POLICIES_PATH, { document });
+  }
+
+  /** This key's stored documents, with the chain its changes belong to,
+   *  the newest change in it (64 zeros when there is none yet) and the
+   *  document in force (empty under the built-in policy). */
+  async listPolicies(): Promise<PolicyList> {
+    this.requireAPIKey();
+    return this.request<PolicyList>("GET", POLICIES_PATH);
+  }
+
+  /** One stored document, with its exact text as `document`. */
+  async getPolicy(documentHash: Hex64): Promise<PolicyWithDocument> {
+    this.requireAPIKey();
+    validateHex64(documentHash, "documentHash");
+    return this.request<PolicyWithDocument>(
+      "GET",
+      `${POLICIES_PATH}/${documentHash}`,
+    );
+  }
+
+  /** Shows which rule would fire on sample inputs, for a document given as
+   *  text or one already stored, named by its hash: exactly one of the two.
+   *  It seals nothing. */
+  async testPolicy(req: PolicyTestRequest): Promise<PolicyTestResult> {
+    this.requireAPIKey();
+    const { inputs, document, documentHash } = req ?? ({} as PolicyTestRequest);
+    if ((document === undefined) === (documentHash === undefined)) {
+      throw new VerdifaxError(
+        "verdifax: testPolicy needs exactly one of document or documentHash",
+      );
+    }
+    if (typeof inputs !== "object" || inputs === null || Array.isArray(inputs)) {
+      throw new VerdifaxError("verdifax: testPolicy needs inputs as an object");
+    }
+    const body: Record<string, unknown> = { inputs };
+    if (document !== undefined) {
+      if (typeof document !== "string") {
+        throw new VerdifaxError(
+          "verdifax: document must be the policy's exact text, as a string",
+        );
+      }
+      body.document = document;
+    } else {
+      validateHex64(documentHash!, "documentHash");
+      body.document_hash = documentHash;
+    }
+    return this.request<PolicyTestResult>(
+      "POST",
+      `${POLICIES_PATH}/test`,
+      body,
+    );
+  }
+
+  /** This key's policy changes, oldest first, as the list the server sends.
+   *  Save it as JSON, for example with
+   *  `writeFileSync("policy-history.json", JSON.stringify(history))`, and
+   *  check it with `verdifax-verify --policy-history policy-history.json`. */
+  async getPolicyHistory(): Promise<PolicyActivation[]> {
+    this.requireAPIKey();
+    return this.request<PolicyActivation[]>("GET", `${POLICIES_PATH}/history`);
+  }
+
+  /** Makes a stored document the policy in force and returns the change
+   *  record. It first reads GET /policies for the chain and its newest
+   *  change, then names that change as the one this follows. With the
+   *  `signingKey` option the request key signs the change, which the server
+   *  requires while a request key is registered.
+   *
+   *  Rolling back is activating an earlier document: it is one more change
+   *  in the chain, so the change it undoes stays on the record.
+   *
+   *  An HTTP 409 means the chain moved because another change came first,
+   *  or the document is not yet effective. It throws the usual
+   *  {@link APIError} and is not retried: read the policies again and
+   *  decide. */
+  async activatePolicy(documentHash: Hex64): Promise<PolicyActivation> {
+    this.requireAPIKey();
+    validateHex64(documentHash, "documentHash");
+    const chain = await this.listPolicies();
+    const previous = chain?.newest_activation_hash;
+    if (typeof previous !== "string") {
+      throw new VerdifaxError(
+        "verdifax: the server did not report newest_activation_hash, so the change cannot name the one it follows",
+      );
+    }
+    const body: {
+      previous_activation_hash: string;
+      signature?: PolicyActivationSignature;
+    } = { previous_activation_hash: previous };
+    if (this.signingKey) {
+      if (typeof chain.chain_id !== "string" || chain.chain_id === "") {
+        throw new VerdifaxError(
+          "verdifax: the server did not report chain_id, so the change cannot be signed",
+        );
+      }
+      body.signature = policyActivationApproval(this.signingKey, {
+        chain_id: chain.chain_id,
+        document_hash: documentHash,
+        previous_activation_hash: previous,
+      });
+    }
+    const out = await this.request<{ ok: boolean; activation: PolicyActivation }>(
+      "POST",
+      `${POLICIES_PATH}/${documentHash}/activate`,
+      body,
+    );
+    return out.activation;
   }
 
   // ── Runs ──────────────────────────────────────────────────────
@@ -714,7 +903,10 @@ export class VerdifaxClient {
     response: string;
     govern?: boolean;
     job?: JobLink;
+    policy_context?: PolicyContext;
+    expected_policy_hash?: Hex64;
   }): Promise<ExecuteResponse> {
+    refuseUnknownFields(args, PROVIDER_ARGS, "attestClaudeResponse arguments");
     return this.attestProviderResponse({ ...args, provider: "anthropic" });
   }
 
@@ -728,7 +920,10 @@ export class VerdifaxClient {
     response: string;
     govern?: boolean;
     job?: JobLink;
+    policy_context?: PolicyContext;
+    expected_policy_hash?: Hex64;
   }): Promise<ExecuteResponse> {
+    refuseUnknownFields(args, PROVIDER_ARGS, "attestOpenAIResponse arguments");
     return this.attestProviderResponse({ ...args, provider: "openai" });
   }
 
@@ -741,6 +936,8 @@ export class VerdifaxClient {
     response: string;
     govern?: boolean;
     job?: JobLink;
+    policy_context?: PolicyContext;
+    expected_policy_hash?: Hex64;
   }): Promise<ExecuteResponse> {
     if (!args.response) {
       throw new VerdifaxError(
@@ -762,6 +959,8 @@ export class VerdifaxClient {
         model_provider: args.provider,
       },
       job: args.job,
+      policy_context: args.policy_context,
+      expected_policy_hash: args.expected_policy_hash,
     });
   }
 

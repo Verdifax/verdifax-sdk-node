@@ -78,9 +78,139 @@ export interface ExecuteRequest {
   /** Places this run in a job map. Not accepted by a determinism check,
    *  which runs twice. */
   job?: JobLink;
+  /** What this request declares for the rules of an active customer policy
+   *  to read. Unknown keys and values outside the lists are refused before
+   *  sending. */
+  policy_context?: PolicyContext;
+  /** The policy hash this request expects to run under. When another policy
+   *  is active the server refuses the run with HTTP 409. */
+  expected_policy_hash?: Hex64;
   /** A version 1 signature for an unsigned client to send. A client with
    *  the `signingKey` option sends version 2 and drops this field. */
   request_signature?: RequestSignature;
+}
+
+/** Who the attested actor is, for a policy rule to read. */
+export type PolicyActorType = "agent" | "user" | "service" | "system";
+
+/** What the request acts on, for a policy rule to read. */
+export type PolicyObjectType =
+  | "text"
+  | "transaction"
+  | "code"
+  | "data"
+  | "model"
+  | "file";
+
+/** A classification level, for a policy rule to read. */
+export type PolicyClassification =
+  | "PUBLIC"
+  | "INTERNAL"
+  | "CONFIDENTIAL"
+  | "RESTRICTED"
+  | "TOP_SECRET"
+  | "TS_SCI";
+
+/** The facts a request declares for the rules of a customer policy. These
+ *  are the caller's own statements: a rule on them judges what was
+ *  declared, and cannot show that it is true. Every key is optional, and
+ *  the client refuses any other key before sending, because a misspelt key
+ *  would be dropped and a rule on it would read its zero value.
+ *
+ *  `actor_type`, `mfa_satisfied` and `session_age_seconds` describe the
+ *  attested actor, so a request that sets one of them must also carry an
+ *  `attested_context` naming the actor, for example its `actor_id`. */
+export interface PolicyContext {
+  actor_type?: PolicyActorType;
+  mfa_satisfied?: boolean;
+  /** A non-negative whole number of seconds. */
+  session_age_seconds?: number;
+  object_type?: PolicyObjectType;
+  /** At most 256 bytes of UTF-8. */
+  object_id?: string;
+  classification?: PolicyClassification;
+}
+
+// ── Policies ────────────────────────────────────────────────────
+
+/** A stored policy document, as POST /policies and GET /policies return
+ *  it. */
+export interface Policy {
+  policy_id: string;
+  policy_version: string;
+  policy_hash: Hex64;
+  /** SHA-256 of the exact text that was uploaded. */
+  document_hash: Hex64;
+  created_at: string;
+}
+
+/** Returned by {@link VerdifaxClient.getPolicy}: the stored policy and its
+ *  exact text. */
+export interface PolicyWithDocument extends Policy {
+  document: string;
+}
+
+/** Returned by {@link VerdifaxClient.listPolicies}. */
+export interface PolicyList {
+  ok: boolean;
+  /** The chain of this key's policy changes, for example `api-key-7`. */
+  chain_id?: string;
+  /** The newest change, or 64 zeros when there is none yet. */
+  newest_activation_hash: Hex64;
+  /** The document in force, or empty under the built-in policy. */
+  active_document_hash: string;
+  policies: Policy[];
+}
+
+/** The argument of {@link VerdifaxClient.testPolicy}: sample inputs and
+ *  exactly one of `document` or `documentHash`. */
+export interface PolicyTestRequest {
+  /** Sample inputs for the rules, passed through as given. */
+  inputs: Record<string, unknown>;
+  /** The exact text of a policy to test. */
+  document?: string;
+  /** The document hash of a policy already uploaded under this key. */
+  documentHash?: Hex64;
+}
+
+/** Returned by {@link VerdifaxClient.testPolicy}. A test seals nothing. */
+export interface PolicyTestResult {
+  ok: boolean;
+  /** Always false. */
+  sealed: boolean;
+  outcome: string;
+  fired_rule_id: string;
+  reason_code: string;
+}
+
+/** The signature of a policy activation: the request key's approval of
+ *  the change. */
+export interface PolicyActivationSignature {
+  /** Base64 Ed25519 signature by the request key. */
+  signature: string;
+  /** RFC 3339 UTC with whole seconds. */
+  signed_at: string;
+  /** 16 random bytes as 32 lowercase hex characters, fresh per change. */
+  nonce: string;
+}
+
+/** One policy change, as {@link VerdifaxClient.activatePolicy} and
+ *  {@link VerdifaxClient.getPolicyHistory} return it. */
+export interface PolicyActivation {
+  format: string;
+  chain_id: string;
+  sequence: number;
+  previous_activation_hash: Hex64;
+  policy_id: string;
+  policy_version: string;
+  policy_hash: Hex64;
+  document_hash: Hex64;
+  activated_at: string;
+  /** Present when the request key signed the change. */
+  signature?: PolicyActivationSignature & { public_key: string };
+  activation_hash: Hex64;
+  /** Where the change was logged on the public log. */
+  anchor?: Record<string, unknown>;
 }
 
 /** Places one run in a job. `job_id` and `step_id` are 1 to 128 letters,
@@ -385,6 +515,10 @@ export interface AttestRequest {
   causal_graph?: Record<string, unknown>;
   /** Places this run in a job map. {@link VerdifaxJob.step} fills it in. */
   job?: JobLink;
+  /** What this request declares for the rules of a customer policy. */
+  policy_context?: PolicyContext;
+  /** The policy hash this request expects to run under. */
+  expected_policy_hash?: Hex64;
 }
 
 /** The second argument of {@link VerdifaxJob.step}: everything

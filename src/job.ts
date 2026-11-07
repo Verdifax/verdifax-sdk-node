@@ -29,6 +29,8 @@ const STEP_OPTIONS: Record<keyof JobStepOptions, true> = {
   authorization_chain: true,
   regulatory_scaffolding: true,
   causal_graph: true,
+  policy_context: true,
+  expected_policy_hash: true,
   after: true,
   external_previous: true,
   final: true,
