@@ -479,6 +479,16 @@ test("getSignOffs reads a run's sign-offs on the member route, or the owner's wi
   ]);
 });
 
+test("getSignOffs keeps every field the server sealed, including one this SDK does not name", async () => {
+  const sealed = {
+    ...RECORD,
+    signal: { signal_account: "account-7", signal_sequence: 5, signal_previous_hash: "0".repeat(64) },
+    a_later_field: { n: 1 },
+  };
+  const { result } = await withServer(() => ({ json: [sealed] }), (c) => c.getSignOffs(42));
+  assert.equal(JSON.stringify(result), JSON.stringify([sealed]));
+});
+
 test("getSignOffs gives an empty list for none and refuses a bad run id or asOwner before sending", async () => {
   const empty = await withServer(() => ({ json: [] }), (c) => c.getSignOffs(42));
   assert.deepEqual(empty.result, []);
