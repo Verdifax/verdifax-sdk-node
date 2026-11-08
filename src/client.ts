@@ -101,6 +101,7 @@ import type {
   SignOffDecision,
   SignOffOptions,
   SignOffRecord,
+  PublicationResult,
   SignOffTarget,
   VerdifaxVersion,
   VerifyDeterminismResponse,
@@ -1031,6 +1032,35 @@ export class VerdifaxClient {
    *  `verdifax-verify --signoff FILE` reads: for a member key, a run it
    *  made; with `asOwner`, any run of the account. The latest is the
    *  decision in force. */
+  /** Make one of the account's records public on its random link with
+   *  `POST /account/runs/{id}/publish`. Needs the account's owner key; the
+   *  record may have been made by any key of the account. The decision is
+   *  sealed as a run publication and placed in the signal feed as a
+   *  `run.published` event. Idempotent: a record already public is answered
+   *  as it is, with `publication: null`. The service's admin key cannot
+   *  publish another key's record. */
+  async publishRun(runId: number): Promise<PublicationResult> {
+    this.requireAPIKey();
+    requirePositiveId(runId, "runId");
+    return this.request<PublicationResult>(
+      "POST",
+      `${ACCOUNT_PATH}/runs/${runId}/publish`,
+    );
+  }
+
+  /** Withdraw one of the account's records from its public link with
+   *  `POST /account/runs/{id}/unpublish`; the link is kept, so a later
+   *  {@link publishRun} restores it. Sealed as a `run.unpublished` event.
+   *  Needs the account's owner key. */
+  async unpublishRun(runId: number): Promise<PublicationResult> {
+    this.requireAPIKey();
+    requirePositiveId(runId, "runId");
+    return this.request<PublicationResult>(
+      "POST",
+      `${ACCOUNT_PATH}/runs/${runId}/unpublish`,
+    );
+  }
+
   async getSignOffs(
     runId: number,
     options: AsOwnerOptions = {},

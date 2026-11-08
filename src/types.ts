@@ -885,6 +885,41 @@ export interface SignOffTarget {
   job_id?: string;
 }
 
+/** One record made public or withdrawn by the account's owner,
+ *  verdifax.run-publication.v1: sealed with its place in the account's signal
+ *  feed and anchored on the public log. `verdifax-verify --signals` reads it
+ *  since v0.24.0. Save it as the server sent it. */
+export interface RunPublication {
+  format: string;
+  /** `run.published` or `run.unpublished`. */
+  action: "run.published" | "run.unpublished";
+  run_id: number;
+  /** The record's own hash, so the publication binds the exact record. */
+  record_hash: Hex64;
+  /** The record's job and step, when it has one. */
+  job_id?: string;
+  step_id?: string;
+  changed_at: string;
+  /** The record's place in the account's signal feed. */
+  signal: { signal_account: string; signal_sequence: number; signal_previous_hash: Hex64 };
+  publication_hash: Hex64;
+  /** The public-log anchor; absent while the entry is still being anchored. */
+  anchor?: unknown;
+}
+
+/** The answer to {@link VerdifaxClient.publishRun} and
+ *  {@link VerdifaxClient.unpublishRun}: the run's public state, its links
+ *  while public, and the publication the call sealed, null when the run was
+ *  already in the asked state. */
+export interface PublicationResult {
+  ok: boolean;
+  run_id: number;
+  public: boolean;
+  public_bundle_url?: string;
+  verify_url: string;
+  publication: RunPublication | null;
+}
+
 /** One sign-off, verdifax.signoff.v1, as the server records it and
  *  `verdifax-verify --signoff` and `--signoff-history` read it. */
 export interface SignOffRecord {
@@ -1009,7 +1044,9 @@ export type SignalKind =
   | "approver.registered"
   | "approver.revoked"
   | "key.created"
-  | "key.revoked";
+  | "key.revoked"
+  | "run.published"
+  | "run.unpublished";
 
 /** The Verdifax event inside a {@link SignalEvent}, verdifax.signal.v1. */
 export interface SignalEventData {

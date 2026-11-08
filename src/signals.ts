@@ -63,6 +63,8 @@ const SIGNAL_KINDS: readonly SignalKind[] = Object.freeze([
   "approver.revoked",
   "key.created",
   "key.revoked",
+  "run.published",
+  "run.unpublished",
 ]);
 
 /** A read of the feed: the path with its query and the timeout to use. */
