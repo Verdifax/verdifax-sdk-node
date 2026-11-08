@@ -995,3 +995,201 @@ export interface ApproverRevocation {
   id: number;
   revoked: boolean;
 }
+
+// ── Signal feed ─────────────────────────────────────────────────
+
+/** The kind of a control signal. Each is also a CloudEvents type,
+ *  `com.verdifax.` and the kind. */
+export type SignalKind =
+  | "run.refused"
+  | "run.halted"
+  | "run.failed"
+  | "policy.changed"
+  | "signoff.recorded"
+  | "approver.registered"
+  | "approver.revoked"
+  | "key.created"
+  | "key.revoked";
+
+/** The Verdifax event inside a {@link SignalEvent}, verdifax.signal.v1. */
+export interface SignalEventData {
+  /** `verdifax.signal.v1`. */
+  form: string;
+  kind: SignalKind | (string & {});
+  /** The account, `account-N`. */
+  account: string;
+  /** The event's place in the account's feed, from 1. */
+  sequence: number;
+  /** The previous event's `event_hash`, or 64 zeros for the account's
+   *  first event. */
+  previous_signal_hash: Hex64;
+  /** {@link signalEventHash} of the kind, the entry's hash and the place. */
+  event_hash: Hex64;
+  run_id?: number;
+  api_key_id?: number;
+  /** A short reason a reader can route on, for a refused, halted or
+   *  failed run. */
+  reason?: string;
+  /** The sealed entry the event names, in the exact form
+   *  `verdifax-verify` reads. */
+  entry: Record<string, unknown>;
+}
+
+/** One control signal, as a CloudEvents 1.0 envelope. */
+export interface SignalEvent {
+  specversion: string;
+  /** `account-N/SEQUENCE`. */
+  id: string;
+  source: string;
+  /** `com.verdifax.` and the kind. */
+  type: string;
+  time: string;
+  datacontenttype: string;
+  data: SignalEventData;
+}
+
+/** One page of the feed. Returned by {@link VerdifaxClient.getSignals}. */
+export interface SignalPage {
+  /** The events after the place asked for, oldest first. */
+  events: SignalEvent[];
+  /** The place to read from next: the last event's sequence, or the
+   *  place asked for when the page is empty. */
+  next_after: number;
+  /** The newest sequence in the account's feed, 0 when it is empty. */
+  newest: number;
+}
+
+/** Options for {@link VerdifaxClient.getSignals}. */
+export interface GetSignalsOptions {
+  /** The last sequence already read. 0, the default, reads from the start. */
+  after?: number;
+  /** 1 to 500 events. The server's default is 100. */
+  limit?: number;
+  /** 0 to 25 seconds to hold the request open when there is no event yet.
+   *  Defaults to 0. */
+  wait?: number;
+  /** Read GET /account/signals with the owner key instead of GET /signals
+   *  with a feed key. */
+  asOwner?: boolean;
+}
+
+/** Options for {@link VerdifaxClient.followSignals}. */
+export interface FollowSignalsOptions {
+  /** The last sequence already read. 0, the default, reads from the start. */
+  after?: number;
+  /** 0 to 25 seconds each read waits for the next event. Defaults to 25. */
+  wait?: number;
+  /** Read GET /account/signals with the owner key instead of GET /signals
+   *  with a feed key. */
+  asOwner?: boolean;
+}
+
+/** Options for {@link VerdifaxClient.createFeedKey}. */
+export interface CreateFeedKeyOptions {
+  /** RFC 3339 or YYYY-MM-DD. */
+  expiresAt?: string;
+}
+
+/** A new feed key with its secret, which is shown this once. A feed key
+ *  reads the account's signal feed and nothing else. Returned by
+ *  {@link VerdifaxClient.createFeedKey}. */
+export type CreatedFeedKey = CreatedAccountKey;
+
+/** Returned by {@link VerdifaxClient.revokeFeedKey}. */
+export interface FeedKeyRevocation {
+  ok: boolean;
+  id: number;
+  revoked: boolean;
+}
+
+/** Options for {@link VerdifaxClient.createWebhook}. */
+export interface CreateWebhookOptions {
+  /** The kinds to deliver, each once. Empty or left out takes every kind. */
+  types?: SignalKind[];
+}
+
+/** A webhook subscription, without its secret. */
+export interface Webhook {
+  id: number;
+  url: string;
+  /** The kinds it delivers. Empty means every kind. */
+  types: SignalKind[];
+  created_at: string;
+}
+
+/** A new webhook subscription with its secret, `whsec_` and base64,
+ *  which is shown this once. Check each delivery with it using
+ *  {@link verifyWebhook}. Returned by {@link VerdifaxClient.createWebhook}. */
+export interface CreatedWebhook extends Webhook {
+  ok: boolean;
+  secret: string;
+  hint: string;
+}
+
+/** Returned by {@link VerdifaxClient.listWebhooks}. */
+export interface WebhookList {
+  ok: boolean;
+  webhooks: Webhook[];
+}
+
+/** Returned by {@link VerdifaxClient.deleteWebhook}. */
+export interface WebhookDeletion {
+  ok: boolean;
+  id: number;
+  deleted: boolean;
+}
+
+/** Options for {@link VerdifaxClient.listWebhookDeliveries}. */
+export interface ListWebhookDeliveriesOptions {
+  /** 1 to 500 deliveries. The server's default is 50. */
+  limit?: number;
+}
+
+/** One delivery of one event to a webhook. A delivery is a copy: the pull
+ *  feed and the public log are the record. */
+export interface WebhookDelivery {
+  /** The event's place in the account's feed. */
+  sequence: number;
+  /** `pending`, `delivered` or `failed`. */
+  status: string;
+  attempts: number;
+  last_status_code: number;
+  last_error: string;
+  created_at: string;
+  delivered_at?: string;
+  next_attempt_at?: string;
+}
+
+/** Returned by {@link VerdifaxClient.listWebhookDeliveries}: the newest
+ *  deliveries first. */
+export interface WebhookDeliveryList {
+  ok: boolean;
+  webhook_id: number;
+  deliveries: WebhookDelivery[];
+}
+
+/** The headers of a webhook delivery: a fetch `Headers`, or an object such
+ *  as Node's `req.headers`. Names are read without regard to case. */
+export type WebhookHeaders =
+  | { get(name: string): string | null }
+  | Record<string, string | string[] | undefined>;
+
+/** Options for {@link verifyWebhook}. */
+export interface VerifyWebhookOptions {
+  /** How far, in seconds, `webhook-timestamp` may be from `now` in either
+   *  direction. Defaults to 300. */
+  toleranceSeconds?: number;
+  /** The time to check the timestamp against. Defaults to the current
+   *  time. */
+  now?: Date;
+}
+
+/** An event's place in its account's feed, for {@link signalEventHash}. */
+export interface SignalEventHashFields {
+  /** The account, `account-N`. */
+  account: string;
+  /** The event's sequence, a whole number. */
+  sequence: number;
+  /** The previous event's hash, or 64 zeros for the account's first. */
+  previousSignalHash: string;
+}

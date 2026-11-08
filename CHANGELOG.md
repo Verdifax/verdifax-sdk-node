@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.5.0
+
+Adds the signal feed: every control signal Verdifax recorded for the account, in order, each with its sealed entry. The kinds are refused, halted and failed runs, policy changes, sign-offs, approver keys registered and revoked, and keys created and revoked. The feed cannot show a signal Verdifax never recorded.
+
+- `getSignals({ after, limit, wait, asOwner })` reads one page of the feed, and `followSignals({ after, wait, asOwner })` is an async generator that reads page after page from `next_after`, never skips, waits on the server when there is no new event and retries a failed read like any GET. When a read still fails it throws `SignalFeedError`, whose `lastSequence` is the last sequence it handed out, so the feed is never lost. With `asOwner: true` both read the owner key's `/account/signals`. A signals call's timeout is at least its wait plus 30 seconds.
+- Feed keys: `createFeedKey(name, { expiresAt })` and `revokeFeedKey(id)`, with the owner key. A feed key reads the feed and nothing else.
+- Webhooks: `createWebhook(url, { types })`, `listWebhooks`, `deleteWebhook(id)` and `listWebhookDeliveries(id, { limit })`, with the owner key. A webhook delivery is a copy: the pull feed and the public log are the record.
+- `verifyWebhook(headers, body, secret, { toleranceSeconds, now })` checks a delivery under the Standard Webhooks scheme: the `whsec_` secret, the `webhook-id` and `webhook-timestamp` headers, a timestamp within the tolerance (default 300 seconds) and any one `v1` signature in `webhook-signature`, compared in constant time. It returns the CloudEvent, or throws naming the check that failed, and never puts the secret in a message.
+- `getFailureReceipt(runId)` returns a failed run's sealed failure receipt.
+- `signalEventHash(kind, entryHash, { account, sequence, previousSignalHash })` recomputes an event's hash and makes no request.
+- Every argument listed above is checked before anything is sent.
+- Types for the events, pages, feed keys, webhooks and deliveries.
+- The default User-Agent is `verdifax-sdk-node/1.5.0`.
+
+`verdifax-verify --signals` checks a saved feed.
+
+Every existing method behaves as before.
+
 ## 1.4.0
 
 Adds customer sign-off. An approver signs a decision, approve or reject, on one exact result: a completed run's record, a refused or halted run's receipt, or a whole job by its final step.

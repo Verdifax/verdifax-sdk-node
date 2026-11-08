@@ -87,3 +87,22 @@ export class APIKeyRequiredError extends VerdifaxError {
     super("verdifax: apiKey is required for this endpoint");
   }
 }
+
+/** Thrown by {@link VerdifaxClient.followSignals} when a read fails or a
+ *  page does not follow on from the last one. `lastSequence` is the last
+ *  sequence the generator handed out, so the feed is never lost: follow
+ *  again with `after: lastSequence`. The error the read threw, after the
+ *  client's normal retries, is `cause`. */
+export class SignalFeedError extends VerdifaxError {
+  override readonly name: string = "VerdifaxSignalFeedError";
+  constructor(
+    public readonly lastSequence: number,
+    reason: string,
+    options?: { cause?: unknown },
+  ) {
+    super(
+      `verdifax: the signal feed stopped after sequence ${lastSequence}: ${reason}; follow again with after: ${lastSequence}`,
+      options,
+    );
+  }
+}

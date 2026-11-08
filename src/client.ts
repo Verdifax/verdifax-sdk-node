@@ -26,6 +26,16 @@ import {
   withExecuteFlags,
 } from "./helpers.js";
 import { VerdifaxJob } from "./job.js";
+import {
+  deliveriesPath,
+  FEED_KEYS_PATH,
+  feedKeyBody,
+  followSignalFeed,
+  followStart,
+  signalsRead,
+  webhookBody,
+  WEBHOOKS_PATH,
+} from "./signals.js";
 import type {
   Account,
   AccountInfo,
@@ -48,6 +58,10 @@ import type {
   ClientConfig,
   CreateAccountKeyOptions,
   CreatedAccountKey,
+  CreatedFeedKey,
+  CreatedWebhook,
+  CreateFeedKeyOptions,
+  CreateWebhookOptions,
   DCAEProofBundle,
   DCAEVerdict,
   DeletionReceipt,
@@ -55,11 +69,15 @@ import type {
   ExecuteRequest,
   ExecuteResponse,
   ExportRunsParams,
+  FeedKeyRevocation,
+  FollowSignalsOptions,
+  GetSignalsOptions,
   Health,
   Hex64,
   JobLink,
   ListAttestationsParams,
   ListRunsParams,
+  ListWebhookDeliveriesOptions,
   NewestSignOff,
   PDFFormat,
   Policy,
@@ -77,6 +95,8 @@ import type {
   RunStats,
   RunSummary,
   SearchRunsParams,
+  SignalEvent,
+  SignalPage,
   SignedRequestBody,
   SignOffDecision,
   SignOffOptions,
@@ -85,8 +105,13 @@ import type {
   VerdifaxVersion,
   VerifyDeterminismResponse,
   VerifyResponse,
+  WebhookDeletion,
+  WebhookDeliveryList,
+  WebhookList,
 } from "./types.js";
 import {
+  asOwnerOf,
+  requirePositiveId,
   validateHex64,
   validateJobName,
   validateRouteId,
@@ -248,6 +273,15 @@ interface RawResponse {
  * | `getNewestSignOff(options)` | GET /signoffs/newest, or GET /account/signoffs/newest with asOwner | required |
  * | `getSignOffs(runId, options)` | GET /runs/{id}/signoffs, or GET /account/runs/{id}/signoffs with asOwner | required |
  * | `getSignOffHistory()` | GET /account/signoffs/history | owner key |
+ * | `getSignals(options)` | GET /signals, or GET /account/signals with asOwner | feed key, or owner key |
+ * | `followSignals(options)` | GET /signals page after page, or GET /account/signals with asOwner | feed key, or owner key |
+ * | `createFeedKey(name, options)` | POST /account/feed-keys | owner key |
+ * | `revokeFeedKey(id)` | DELETE /account/feed-keys/{id} | owner key |
+ * | `createWebhook(url, options)` | POST /account/webhooks | owner key |
+ * | `listWebhooks()` | GET /account/webhooks | owner key |
+ * | `deleteWebhook(id)` | DELETE /account/webhooks/{id} | owner key |
+ * | `listWebhookDeliveries(id, options)` | GET /account/webhooks/{id}/deliveries | owner key |
+ * | `getFailureReceipt(id)` | GET /runs/{id}/failure-receipt | required |
  * | `job(jobId)` | none, returns a {@link VerdifaxJob} | none |
  *
  * With the `signingKey` option set, every path to POST /execute carries
@@ -1026,6 +1060,124 @@ export class VerdifaxClient {
     );
   }
 
+  // ── Signal feed ──────────────────────────────────────────────
+  //
+  // Every control signal Verdifax recorded for the account, in order, each
+  // with its sealed entry. The feed cannot show a signal Verdifax never
+  // recorded. A feed key reads it on GET /signals and does nothing else;
+  // the owner key reads it with asOwner and manages feed keys and webhooks.
+  // The feed and webhook logic is in signals.ts.
+
+  /** One page of the account's feed: the events after `after`, oldest
+   *  first, with `next_after` to read from next. With `wait` the server
+   *  holds the request open up to that many seconds for the next event, and
+   *  this call's timeout is at least the wait plus 30 seconds. With
+   *  `asOwner` it reads GET /account/signals with the owner key. Bad
+   *  options are refused before sending. Save the events and check them
+   *  with `verdifax-verify --signals`. */
+  async getSignals(options: GetSignalsOptions = {}): Promise<SignalPage> {
+    this.requireAPIKey();
+    const read = signalsRead(options, "getSignals", this.timeoutMs);
+    const out = await this.request<SignalPage>(
+      "GET",
+      read.path,
+      undefined,
+      false,
+      read.timeoutMs,
+    );
+    return { ...out, events: out?.events ?? [] };
+  }
+
+  /** Follows the feed from `after`, yielding each event once, in order,
+   *  until you stop with `break` or `return`. Each read starts at the page
+   *  before's `next_after`, waits up to `wait` seconds (default 25) when
+   *  there is no event, and is retried like any GET. A read that still
+   *  fails throws {@link SignalFeedError}, whose `lastSequence` is the last
+   *  sequence yielded: follow again from there and nothing is lost. Bad
+   *  options are refused here, before anything is sent. */
+  followSignals(
+    options: FollowSignalsOptions = {},
+  ): AsyncGenerator<SignalEvent, void, undefined> {
+    this.requireAPIKey();
+    const start = followStart(options);
+    return followSignalFeed(
+      (after) =>
+        this.getSignals({ after, wait: start.wait, asOwner: start.asOwner }),
+      start,
+    );
+  }
+
+  /** Creates a feed key in the owner's account. A feed key reads the
+   *  account's signal feed, with {@link getSignals} and
+   *  {@link followSignals}, and nothing else. The secret is in the result
+   *  this once. */
+  async createFeedKey(
+    name: string,
+    options: CreateFeedKeyOptions = {},
+  ): Promise<CreatedFeedKey> {
+    this.requireAPIKey();
+    return this.request<CreatedFeedKey>(
+      "POST",
+      FEED_KEYS_PATH,
+      feedKeyBody(name, options?.expiresAt),
+    );
+  }
+
+  /** Revokes one of the account's feed keys. An id that is not a feed key
+   *  of the account throws {@link NotFoundError}. */
+  async revokeFeedKey(id: number): Promise<FeedKeyRevocation> {
+    this.requireAPIKey();
+    requirePositiveId(id, "id");
+    return this.request<FeedKeyRevocation>("DELETE", `${FEED_KEYS_PATH}/${id}`);
+  }
+
+  /** Subscribes an https address to the account's signals. `types` are the
+   *  kinds to deliver, each once; empty or left out takes every kind. The
+   *  secret, `whsec_` and base64, is in the result this once: check each
+   *  delivery with {@link verifyWebhook}. A delivery is a copy: the pull
+   *  feed and the public log are the record. The server checks the address
+   *  too, and refuses an eleventh subscription with HTTP 409. */
+  async createWebhook(
+    url: string,
+    options: CreateWebhookOptions = {},
+  ): Promise<CreatedWebhook> {
+    this.requireAPIKey();
+    return this.request<CreatedWebhook>(
+      "POST",
+      WEBHOOKS_PATH,
+      webhookBody(url, options),
+    );
+  }
+
+  /** The account's webhook subscriptions, without their secrets. */
+  async listWebhooks(): Promise<WebhookList> {
+    this.requireAPIKey();
+    const out = await this.request<WebhookList>("GET", WEBHOOKS_PATH);
+    return { ...out, webhooks: out?.webhooks ?? [] };
+  }
+
+  /** Ends a webhook subscription. Its events stay in the pull feed. */
+  async deleteWebhook(id: number): Promise<WebhookDeletion> {
+    this.requireAPIKey();
+    requirePositiveId(id, "id");
+    return this.request<WebhookDeletion>("DELETE", `${WEBHOOKS_PATH}/${id}`);
+  }
+
+  /** A webhook's newest deliveries first, up to `limit` (1 to 500; the
+   *  server's default is 50). */
+  async listWebhookDeliveries(
+    id: number,
+    options: ListWebhookDeliveriesOptions = {},
+  ): Promise<WebhookDeliveryList> {
+    this.requireAPIKey();
+    requirePositiveId(id, "id");
+    const out = await this.request<WebhookDeliveryList>(
+      "GET",
+      deliveriesPath(id, options),
+    );
+    return { ...out, deliveries: out?.deliveries ?? [] };
+  }
+
   // ── Runs ──────────────────────────────────────────────────────
 
   async getRun(runId: number): Promise<Run> {
@@ -1221,6 +1373,15 @@ export class VerdifaxClient {
 
   async getCESAuditRecord(runId: number): Promise<Record<string, unknown>> {
     return this.getRunArtifact(runId, "ces-audit-record");
+  }
+
+  /** A failed run's sealed failure receipt, in the form `verdifax-verify`
+   *  reads. A run that failed before failure receipts were sealed has none
+   *  and throws {@link NotFoundError}. */
+  async getFailureReceipt(runId: number): Promise<Record<string, unknown>> {
+    this.requireAPIKey();
+    requirePositiveId(runId, "runId");
+    return this.getRunArtifact(runId, "failure-receipt");
   }
 
   /** The audit report for a run, as JSON. */
@@ -1502,6 +1663,7 @@ export class VerdifaxClient {
     path: string,
     body?: unknown,
     rawText = false,
+    timeoutMs = this.timeoutMs,
   ): Promise<T> {
     const url = this.baseURL + path;
     const headers: Record<string, string> = {
@@ -1525,7 +1687,7 @@ export class VerdifaxClient {
       }
 
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
       let resp: Response;
       try {
         resp = await fetch(url, {
@@ -1646,15 +1808,6 @@ function signOffsBase(options: AsOwnerOptions, method: string): string {
   return asOwnerOf(options, method) ? ACCOUNT_SIGNOFFS_PATH : SIGNOFFS_PATH;
 }
 
-/** The `asOwner` option, refused unless it is true, false or left out. */
-function asOwnerOf(options: AsOwnerOptions, method: string): boolean {
-  const asOwner = options?.asOwner;
-  if (asOwner !== undefined && typeof asOwner !== "boolean") {
-    throw new VerdifaxError(`verdifax: ${method} asOwner must be true or false`);
-  }
-  return asOwner === true;
-}
-
 /** The target as the server reads it, with only its own fields, or a
  *  refusal naming what is wrong. */
 function signOffTargetOf(target: SignOffTarget): SignOffTarget {
@@ -1714,14 +1867,6 @@ function recordMatchesSent(
     got.digest === target.digest &&
     (got.job_id ?? "") === (target.job_id ?? "")
   );
-}
-
-/** Refuses an id that is not a whole number above zero, before it can
- *  reach a path or a body. */
-function requirePositiveId(id: number, name: string): void {
-  if (!Number.isSafeInteger(id) || id <= 0) {
-    throw new VerdifaxError(`verdifax: ${name} must be a whole number > 0`);
-  }
 }
 
 /** The result with the text that was signed, when the call was signed. */

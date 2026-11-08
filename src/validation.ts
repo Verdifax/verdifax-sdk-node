@@ -57,3 +57,23 @@ export function validateJobName(value: string, fieldName: string): void {
     );
   }
 }
+
+/** Refuses an id that is not a whole number above zero, before it can
+ *  reach a path or a body. */
+export function requirePositiveId(id: number, name: string): void {
+  if (!Number.isSafeInteger(id) || id <= 0) {
+    throw new VerdifaxError(`verdifax: ${name} must be a whole number > 0`);
+  }
+}
+
+/** The `asOwner` option, refused unless it is true, false or left out. */
+export function asOwnerOf(
+  options: { asOwner?: boolean } | undefined,
+  method: string,
+): boolean {
+  const asOwner = options?.asOwner;
+  if (asOwner !== undefined && typeof asOwner !== "boolean") {
+    throw new VerdifaxError(`verdifax: ${method} asOwner must be true or false`);
+  }
+  return asOwner === true;
+}

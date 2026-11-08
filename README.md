@@ -112,6 +112,15 @@ if (v.verified) {
 | `client.getNewestSignOff({ asOwner? })` | `GET /signoffs/newest`, or `GET /account/signoffs/newest` with `asOwner` | required, or owner key |
 | `client.signOff(target, decision, approverKey, { note?, asOwner? })` | `POST /signoffs`, or `POST /account/signoffs` with `asOwner` | required, or owner key |
 | `client.getSignOffs(runId, { asOwner? })` | `GET /runs/{id}/signoffs`, or `GET /account/runs/{id}/signoffs` with `asOwner` | required, or owner key |
+| `client.getSignals({ after?, limit?, wait?, asOwner? })` | `GET /signals`, or `GET /account/signals` with `asOwner` | feed key, or owner key |
+| `client.followSignals({ after?, wait?, asOwner? })` | `GET /signals` page after page, or `GET /account/signals` with `asOwner` | feed key, or owner key |
+| `client.createFeedKey(name, { expiresAt? })` | `POST /account/feed-keys` | owner key |
+| `client.revokeFeedKey(id)` | `DELETE /account/feed-keys/{id}` | owner key |
+| `client.createWebhook(url, { types? })` | `POST /account/webhooks` | owner key |
+| `client.listWebhooks()` | `GET /account/webhooks` | owner key |
+| `client.deleteWebhook(id)` | `DELETE /account/webhooks/{id}` | owner key |
+| `client.listWebhookDeliveries(id, { limit? })` | `GET /account/webhooks/{id}/deliveries` | owner key |
+| `client.getFailureReceipt(id)` | `GET /runs/{id}/failure-receipt` | required |
 | `client.adminCreateKey(name, { accountId? })` | `POST /admin/keys` | admin |
 | `client.adminListKeys()` | `GET /admin/keys` | admin |
 | `client.adminRevokeKey(id)` | `DELETE /admin/keys/{id}` | admin |
@@ -122,7 +131,7 @@ if (v.verified) {
 
 `client.job(jobId)` returns a [job helper](#jobs) and makes no request until a step runs.
 
-These functions make no request: `captureEnvironment`, `formatProviderPayload`, `signRequest`, `signRequestV2`, `requestKeyRegistrationBody`, `requestKeyChangeApproval`, `requestKeyChangePreimage`, `policyActivationApproval`, `policyActivationPreimage`, `signOffPreimage`, `approverKeyProof`, `requestSignaturePreimage`, `requestSignaturePreimageV2`, `generateRequestKeyPair`, `validateHex64`, `validateJobName`, `validateRouteId`, `dseDispatchHash`, `dcaeClosureHash` and `cresReceiptHash`. `RUN_STATUSES` lists every run status the server uses, and `EXECUTE_FIELDS` lists every top-level key a run request may hold.
+These functions make no request: `captureEnvironment`, `formatProviderPayload`, `signRequest`, `signRequestV2`, `requestKeyRegistrationBody`, `requestKeyChangeApproval`, `requestKeyChangePreimage`, `policyActivationApproval`, `policyActivationPreimage`, `signOffPreimage`, `approverKeyProof`, `verifyWebhook`, `signalEventHash`, `requestSignaturePreimage`, `requestSignaturePreimageV2`, `generateRequestKeyPair`, `validateHex64`, `validateJobName`, `validateRouteId`, `dseDispatchHash`, `dcaeClosureHash` and `cresReceiptHash`. `RUN_STATUSES` lists every run status the server uses, and `EXECUTE_FIELDS` lists every top-level key a run request may hold.
 
 `getRunArtifacts`, `getPublicBundle` and `getPublicBundleByToken` return the exact JSON text the server sent, so you can save it and check it with `verdifax-verify`.
 
@@ -349,6 +358,72 @@ A later sign-off on the same result supersedes the earlier one, and nothing is d
 Verdifax did not review the result.
 
 Since v0.22.0, the verifier reads sign-offs with `--signoff` and `--signoff-history`.
+
+## Signal feed
+
+The signal feed is every control signal Verdifax recorded for the account, in order: refused, halted and failed runs, policy changes, sign-offs, approver keys registered and revoked, and keys created and revoked. Each event is a CloudEvent that carries its sealed entry, its place in the feed and the hash of the event before it. The feed cannot show a signal Verdifax never recorded.
+
+A feed key reads the feed and nothing else. The account's owner creates one with `createFeedKey` and revokes it with `revokeFeedKey`, and the owner key reads the same feed with `asOwner: true`.
+
+```typescript
+import { writeFileSync } from "node:fs";
+import { SignalFeedError, VerdifaxClient } from "verdifax";
+
+const owner = new VerdifaxClient({ apiKey: process.env.VERDIFAX_OWNER_KEY! });
+const { secret } = await owner.createFeedKey("grc reader"); // shown this once
+
+const feed = new VerdifaxClient({ apiKey: secret });
+let after = 0; // the last sequence your system stored
+try {
+  for await (const event of feed.followSignals({ after })) {
+    console.log(event.data.sequence, event.type, event.data.reason ?? "");
+    after = event.data.sequence;
+  }
+} catch (err) {
+  if (!(err instanceof SignalFeedError)) throw err;
+  after = err.lastSequence; // follow again from here and nothing is lost
+}
+
+// Save a page and check it with verdifax-verify --signals signals.json.
+writeFileSync("signals.json", JSON.stringify(await feed.getSignals({ limit: 500 })));
+```
+
+`followSignals` reads page after page and starts each read at the previous page's `next_after`, so it never skips an event, and it refuses a page that would skip or go back. When there is no new event, each read waits up to `wait` seconds (default 25) on the server. A failed read is retried like any GET. If it still fails, `followSignals` throws `SignalFeedError`, whose `lastSequence` is the last sequence it handed out and whose `cause` is the error the read threw. It runs until you stop it with `break` or `return`. `getSignals` reads one page: `after` is the last sequence read (default 0), `limit` is 1 to 500 and `wait` is 0 to 25 seconds. The timeout of a signals call is at least its wait plus 30 seconds, whatever the client's `timeoutMs`. Bad options are refused before anything is sent.
+
+The owner key subscribes an https address with `createWebhook(url, { types })`, at most ten per account. `types` are the kinds to deliver, each once; empty or left out takes every kind. The secret, `whsec_` and base64, is in the result this once. Each delivery is signed under the Standard Webhooks scheme. Check it with `verifyWebhook` before you use it, passing the body exactly as received:
+
+```typescript
+import http from "node:http";
+import { verifyWebhook } from "verdifax";
+
+http
+  .createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("end", () => {
+      try {
+        const event = verifyWebhook(req.headers, Buffer.concat(chunks), process.env.VERDIFAX_WEBHOOK_SECRET!);
+        console.log(event.data.sequence, event.type);
+        res.statusCode = 204;
+      } catch (err) {
+        console.error((err as Error).message); // names the check that failed, never the secret
+        res.statusCode = 400;
+      }
+      res.end();
+    });
+  })
+  .listen(8080);
+```
+
+`verifyWebhook` reads the `webhook-id`, `webhook-timestamp` and `webhook-signature` headers without regard to case. It refuses a timestamp more than `toleranceSeconds` (default 300) from `now` in either direction, accepts the delivery when any one `v1` signature matches, compares in constant time and returns the parsed CloudEvent. It throws `VerdifaxError` naming the check that failed, and never puts the secret in a message.
+
+A webhook delivery is a copy: the pull feed and the public log are the record. A delivery can fail or arrive more than once, so store `data.sequence` and read the feed from the last one you stored. `listWebhookDeliveries(id, { limit })` shows each delivery's status and attempts, newest first. `deleteWebhook` ends a subscription, and its events stay in the feed.
+
+`getFailureReceipt(runId)` returns a failed run's sealed failure receipt, in the form `verdifax-verify` reads. A run that failed before failure receipts were sealed has none, and the call throws `NotFoundError`.
+
+`signalEventHash(kind, entryHash, { account, sequence, previousSignalHash })` recomputes an event's `event_hash`, the hash the next event names. It makes no request.
+
+`verdifax-verify --signals FILE` checks a saved feed: each entry as its own kind, that the place each entry seals is the event's place, and that the numbers and links run without a gap.
 
 ## Evidence export
 
