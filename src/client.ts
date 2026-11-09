@@ -1758,14 +1758,19 @@ export class VerdifaxClient {
         }
         let errMessage = text.trim();
         let recordHash: string | undefined;
+        let aivpTraceText: string | undefined;
         try {
           const env = JSON.parse(text) as {
             error?: string;
             record_hash?: unknown;
+            aivp_trace_text?: unknown;
           };
           if (env.error) errMessage = env.error;
           if (typeof env.record_hash === "string" && env.record_hash) {
             recordHash = env.record_hash;
+          }
+          if (typeof env.aivp_trace_text === "string" && env.aivp_trace_text) {
+            aivpTraceText = env.aivp_trace_text;
           }
         } catch {
           /* fall through to raw text */
@@ -1782,6 +1787,7 @@ export class VerdifaxClient {
               errMessage,
               recordHash,
               (body as Partial<SignedRequestBody> | undefined)?.signed_request,
+              aivpTraceText,
             );
         }
       }

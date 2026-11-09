@@ -68,6 +68,9 @@ export class APIError extends VerdifaxError {
     public override readonly message: string,
     public readonly recordHash?: string,
     signedRequest?: string,
+    /** The text the AI review checked, on a run its review halted:
+     *  returned once, and the halt receipt seals its hash. */
+    public readonly aivpTraceText?: string,
   ) {
     super(`verdifax: API error at ${path} (HTTP ${status}): ${message}`);
     if (signedRequest !== undefined) {

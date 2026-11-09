@@ -317,6 +317,11 @@ export interface ExecuteResponse {
   /** The exact text that was signed, when the call was signed. Keep it to
    *  pass to `verdifax-verify --request FILE`. */
   signed_request?: string;
+  /** The text the AI review checked, when a review ran on the run's AI
+   *  output. Verdifax returns it once and does not store it; its SHA-256 is
+   *  sealed in `manifest.AivpReview`. Keep it for `verdifax-verify
+   *  --aivp-trace`. */
+  aivp_trace_text?: string;
 }
 
 /** One row of {@link ExecuteBatchResponse}. A successful row has
@@ -343,6 +348,9 @@ export interface ExecuteBatchResult {
   macc_halt_receipt?: Record<string, unknown>;
   aivp_t4_halt_receipt?: Record<string, unknown>;
   attestation_gap_receipt?: Record<string, unknown>;
+  /** The text the AI review checked on this row, returned once and not
+   *  stored; its hash is sealed in the review. */
+  aivp_trace_text?: string;
 }
 
 /** Body returned by POST /execute/batch. */
@@ -416,6 +424,10 @@ export interface ExecutionManifest {
   AivpPiaHash?: Hex64;
   AivpAdapterID?: string;
   AivpDecision?: string;
+  /** The AI review's record of the answer it read, on runs sealed since the
+   *  server's v1.10 manifest formula. */
+  AivpReviewForm?: string;
+  AivpReview?: AivpReview;
   /** Phase-17 (CRES) sealed-at-write erasure state. */
   EraseStatus?: "intact" | "shredded" | "tombstone" | "";
   ExecutionRegion?: string;
@@ -1236,4 +1248,27 @@ export interface SignalEventHashFields {
   sequence: number;
   /** The previous event's hash, or 64 zeros for the account's first. */
   previousSignalHash: string;
+}
+
+/** The AI review's record of one answer it read: the review setup, the
+ *  SHA-256 of the trace it checked, the checker, what the account policy
+ *  chose a contradiction finding does, the outcome and the finding. */
+export interface AivpReview {
+  formula: string;
+  prompt_id: string;
+  model: string;
+  trace_hash: Hex64;
+  checker_id: string;
+  contradiction_mode: "halt" | "record";
+  contradiction_outcome: "clean" | "halted" | "recorded";
+  finding?: AivpFinding;
+}
+
+/** The contradiction the review's checker found: two trace nodes, by id,
+ *  and the opposing terms in them. */
+export interface AivpFinding {
+  node_a: string;
+  node_b: string;
+  term: string;
+  opposite: string;
 }

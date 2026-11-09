@@ -91,6 +91,8 @@ export type {
   ExecuteBatchResult,
   ExecuteRequest,
   ExecuteResponse,
+  AivpReview,
+  AivpFinding,
   ExecutionManifest,
   ExportRow,
   ExportRunsParams,
