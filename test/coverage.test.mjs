@@ -72,6 +72,7 @@ const ROUTES = [
   ["getRunArtifacts", [7], "/runs/7/artifacts"],
   ["getPublicBundle", [7], "/runs/7/bundle.json"],
   ["getPublicBundleByToken", ["a b/c"], "/public/runs/a%20b%2Fc/bundle.json"],
+  ["getPublicReceiptByToken", ["a b/c"], "/public/runs/a%20b%2Fc/receipt.json"],
 ];
 
 for (const [method, args, url] of ROUTES) {

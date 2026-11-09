@@ -222,6 +222,7 @@ interface RawResponse {
  * | `getRunReport(id)` | GET /runs/{id}/report | required |
  * | `getPublicBundle(id)` | GET /runs/{id}/bundle.json | none |
  * | `getPublicBundleByToken(token)` | GET /public/runs/{token}/bundle.json | none |
+ * | `getPublicReceiptByToken(token)` | GET /public/runs/{token}/receipt.json | none |
  * | `executeBatch(runs)` | POST /execute/batch | required |
  * | `verifyDeterminism(req)` | POST /execute/verify-determinism | required |
  * | `downloadAuditPDF(id, format)` | GET /runs/{id}/report.pdf | required |
@@ -1442,6 +1443,16 @@ export class VerdifaxClient {
   async getPublicBundleByToken(token: string): Promise<string> {
     if (!token) throw new VerdifaxError("verdifax: token is required");
     const path = `/public/runs/${encodeURIComponent(token)}/bundle.json`;
+    return (await this.requestRaw(path)).text;
+  }
+
+  /** The sealed receipt of a published stopped run (a refusal, a halt or
+   *  a failure) a share token points to, as the exact JSON text the server
+   *  sent: the same document the key holder reads from the run's receipt
+   *  route. Needs no API key. */
+  async getPublicReceiptByToken(token: string): Promise<string> {
+    if (!token) throw new VerdifaxError("verdifax: token is required");
+    const path = `/public/runs/${encodeURIComponent(token)}/receipt.json`;
     return (await this.requestRaw(path)).text;
   }
 

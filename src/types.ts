@@ -915,7 +915,11 @@ export interface PublicationResult {
   ok: boolean;
   run_id: number;
   public: boolean;
+  /** Where the record's audit bundle is served, while it is public and has one. */
   public_bundle_url?: string;
+  /** Where a stopped run's sealed receipt is served, while it is public; a
+   *  stopped run has no bundle address (R156). */
+  public_receipt_url?: string;
   verify_url: string;
   publication: RunPublication | null;
 }

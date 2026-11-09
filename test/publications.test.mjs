@@ -75,3 +75,14 @@ test("publishRun refuses a bad id and a client without a key before sending", as
   const keyless = new VerdifaxClient({ baseURL: "http://127.0.0.1:9" });
   await assert.rejects(() => keyless.publishRun(1), APIKeyRequiredError);
 });
+
+test("publishing a stopped run returns its receipt address and no bundle address (R156)", async () => {
+  const STOPPED = {
+    ok: true, run_id: 42, public: true,
+    public_receipt_url: "https://api.verdifax.com/public/runs/tok/receipt.json",
+    verify_url: "https://verdifax.com/verify/?pt=tok&record=receipt", publication: null,
+  };
+  const { result } = await withServer(STOPPED, (c) => c.publishRun(42));
+  assert.equal(result.public_receipt_url, STOPPED.public_receipt_url);
+  assert.equal(result.public_bundle_url, undefined);
+});
