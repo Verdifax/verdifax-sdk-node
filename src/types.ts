@@ -893,6 +893,9 @@ export interface RunPublication {
   format: string;
   /** `run.published` or `run.unpublished`. */
   action: "run.published" | "run.unpublished";
+  /** Who decided: `owner`, or `verdifax_admin` when a Verdifax admin key
+   *  withdrew the record. Absent on a v1 publication, which was the owner's. */
+  decided_by?: "owner" | "verdifax_admin";
   run_id: number;
   /** The record's own hash, so the publication binds the exact record. */
   record_hash: Hex64;

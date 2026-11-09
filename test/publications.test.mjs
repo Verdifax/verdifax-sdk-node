@@ -8,8 +8,9 @@ import http from "node:http";
 import { VerdifaxClient, APIKeyRequiredError } from "../dist/index.mjs";
 
 const PUBLICATION = {
-  format: "verdifax.run-publication.v1",
+  format: "verdifax.run-publication.v2",
   action: "run.published",
+  decided_by: "owner",
   run_id: 41,
   record_hash: "a".repeat(64),
   job_id: "loan-1",
@@ -62,6 +63,7 @@ test("publishRun and unpublishRun post to the owner routes and return the answer
   assert.equal(seen[0].raw, "");
   assert.deepEqual(result, ANSWER);
   assert.equal(result.publication.later_field, "kept as sent");
+  assert.equal(result.publication.decided_by, "owner");
 });
 
 test("publishRun refuses a bad id and a client without a key before sending", async () => {
