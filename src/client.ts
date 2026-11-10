@@ -80,6 +80,7 @@ import type {
   ListWebhookDeliveriesOptions,
   NewestSignOff,
   PDFFormat,
+  AuditPDFOptions,
   Policy,
   PolicyActivation,
   PolicyActivationSignature,
@@ -101,6 +102,8 @@ import type {
   SignOffDecision,
   SignOffOptions,
   SignOffRecord,
+  AccountTimeZone,
+  RestoreGapRecord,
   PublicationResult,
   SignOffTarget,
   VerdifaxVersion,
@@ -225,7 +228,8 @@ interface RawResponse {
  * | `getPublicReceiptByToken(token)` | GET /public/runs/{token}/receipt.json | none |
  * | `executeBatch(runs)` | POST /execute/batch | required |
  * | `verifyDeterminism(req)` | POST /execute/verify-determinism | required |
- * | `downloadAuditPDF(id, format)` | GET /runs/{id}/report.pdf | required |
+ * | `downloadAuditPDF(id, format, { aiOutputText })` | GET or POST /runs/{id}/report.pdf | required |
+ * | `downloadPublicAuditPDF(token, format, { aiOutputText })` | GET or POST /public/runs/{token}/report.pdf | none |
  * | `getAllowToken(id)` | GET /runs/{id}/allow-token | required |
  * | `getDenyReceipt(id)` | GET /runs/{id}/deny-receipt | required |
  * | `getCCVHaltReceipt(id)` | GET /runs/{id}/ccv-halt-receipt | required |
@@ -634,7 +638,7 @@ export class VerdifaxClient {
     method: string,
   ): Promise<PolicyTestResult> {
     this.requireAPIKey();
-    const { inputs, document, documentHash } = req ?? ({} as PolicyTestRequest);
+    const { inputs, document, documentHash, aiOutputDeclared } = req ?? ({} as PolicyTestRequest);
     if ((document === undefined) === (documentHash === undefined)) {
       throw new VerdifaxError(
         `verdifax: ${method} needs exactly one of document or documentHash`,
@@ -654,6 +658,12 @@ export class VerdifaxClient {
     } else {
       validateHex64(documentHash!, "documentHash");
       body.document_hash = documentHash;
+    }
+    if (aiOutputDeclared !== undefined && typeof aiOutputDeclared !== "boolean") {
+      throw new VerdifaxError("verdifax: aiOutputDeclared must be a boolean");
+    }
+    if (aiOutputDeclared) {
+      body.ai_output_declared = true;
     }
     return this.request<PolicyTestResult>("POST", `${base}/test`, body);
   }
@@ -708,6 +718,19 @@ export class VerdifaxClient {
   async getAccount(): Promise<AccountInfo> {
     this.requireAPIKey();
     return this.request<AccountInfo>("GET", ACCOUNT_PATH);
+  }
+
+  /** Chooses the second time zone the account's audit reports show beside
+   *  UTC: an IANA zone such as `Europe/London`, `"none"` for UTC alone, or
+   *  `""` for the zone of the server's region, which an account that never
+   *  chose sees. Needs the owner key. It changes how times are displayed,
+   *  never a sealed value. */
+  async setAccountTimeZone(timeZone: string): Promise<AccountTimeZone> {
+    this.requireAPIKey();
+    if (typeof timeZone !== "string" || timeZone.length > 64) {
+      throw new VerdifaxError("verdifax: timeZone must be a string of at most 64 characters");
+    }
+    return this.request<AccountTimeZone>("PUT", `${ACCOUNT_PATH}/time-zone`, { time_zone: timeZone });
   }
 
   /** Creates a member key in the account. It takes the account's tier and
@@ -1081,10 +1104,10 @@ export class VerdifaxClient {
 
   /** The account's whole chain of sign-offs, oldest first, in the form
    *  `verdifax-verify --signoff-history FILE` reads. Needs the owner key. */
-  async getSignOffHistory(): Promise<SignOffRecord[]> {
+  async getSignOffHistory(): Promise<(SignOffRecord | RestoreGapRecord)[]> {
     this.requireAPIKey();
     return (
-      (await this.request<SignOffRecord[]>(
+      (await this.request<(SignOffRecord | RestoreGapRecord)[]>(
         "GET",
         `${ACCOUNT_SIGNOFFS_PATH}/history`,
       )) ?? []
@@ -1471,34 +1494,80 @@ export class VerdifaxClient {
   // ── Audit PDF (auth) ─────────────────────────────────────────
 
   /** Streams the audit PDF bytes as a Buffer. Format defaults to
-   *  "comprehensive" when not specified. */
+   *  "comprehensive" when not specified. With `aiOutputText`, the AI's
+   *  exact answer, the report prints it on its first page, marked as
+   *  supplied by the caller, only when its SHA-256 is the hash the record
+   *  seals; other text throws an APIError (422). Verdifax stores only the
+   *  hash. */
   async downloadAuditPDF(
     runId: number,
     format: PDFFormat = "comprehensive",
+    options: AuditPDFOptions = {},
   ): Promise<Buffer> {
     this.requireAPIKey();
     if (runId <= 0) throw new VerdifaxError("verdifax: runId must be > 0");
-    const path = `/runs/${runId}/report.pdf?format=${encodeURIComponent(format)}`;
+    return this.fetchAuditPDF(`/runs/${runId}/report.pdf`, format, options);
+  }
 
-    const headers: Record<string, string> = {
-      "User-Agent": this.userAgent,
-      [HEADER_API_KEY]: this.apiKey,
-    };
+  /** The audit PDF of a published record a share token points to, with
+   *  the answer printed as `downloadAuditPDF` prints it. Needs no API key. */
+  async downloadPublicAuditPDF(
+    token: string,
+    format: PDFFormat = "comprehensive",
+    options: AuditPDFOptions = {},
+  ): Promise<Buffer> {
+    if (!token) throw new VerdifaxError("verdifax: token is required");
+    return this.fetchAuditPDF(
+      `/public/runs/${encodeURIComponent(token)}/report.pdf`,
+      format,
+      options,
+    );
+  }
+
+  private async fetchAuditPDF(
+    base: string,
+    format: PDFFormat,
+    options: AuditPDFOptions,
+  ): Promise<Buffer> {
+    const answer = options.aiOutputText;
+    if (answer !== undefined && (typeof answer !== "string" || answer === "")) {
+      throw new VerdifaxError(
+        "verdifax: aiOutputText must be the AI's exact answer, a non-empty string",
+      );
+    }
+    const headers: Record<string, string> = { "User-Agent": this.userAgent };
+    if (this.apiKey) headers[HEADER_API_KEY] = this.apiKey;
+    let path = base;
+    let body: string | undefined;
+    if (answer === undefined) {
+      path += `?format=${encodeURIComponent(format)}`;
+    } else {
+      headers["Content-Type"] = "application/json";
+      body = JSON.stringify({ format, ai_output_text: answer });
+    }
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     let resp: Response;
     try {
       resp = await fetch(this.baseURL + path, {
-        method: "GET",
+        method: answer === undefined ? "GET" : "POST",
         headers,
+        body,
         signal: controller.signal,
       });
     } finally {
       clearTimeout(timer);
     }
     if (!resp.ok) {
-      throw new APIError(resp.status, path, "audit PDF download failed");
+      let message = "audit PDF download failed";
+      try {
+        const parsed = (await resp.json()) as { error?: unknown };
+        if (typeof parsed.error === "string" && parsed.error) message = parsed.error;
+      } catch {
+        // Not JSON: keep the generic message.
+      }
+      throw new APIError(resp.status, path, message);
     }
     const buf = await resp.arrayBuffer();
     return Buffer.from(buf);

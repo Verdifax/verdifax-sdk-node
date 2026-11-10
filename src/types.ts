@@ -171,6 +171,10 @@ export interface PolicyTestRequest {
   document?: string;
   /** The document hash of a policy already uploaded under this key. */
   documentHash?: Hex64;
+  /** Whether the request being tried declares an AI output, as
+   *  `ai_output_text` does on a run: a policy that requires an AI review
+   *  refuses a step without one. Sent only when true. */
+  aiOutputDeclared?: boolean;
 }
 
 /** Returned by {@link VerdifaxClient.testPolicy}. A test seals nothing. */
@@ -704,6 +708,13 @@ export interface RunStats {
 /** Audit-PDF format selector. */
 export type PDFFormat = "brief" | "auditor" | "legal" | "comprehensive";
 
+/** Options of an audit PDF request. `aiOutputText` is the AI's exact
+ *  answer: the report prints it, marked as supplied by the caller, only
+ *  when its SHA-256 is the hash the record seals. */
+export interface AuditPDFOptions {
+  aiOutputText?: string;
+}
+
 /** Body shape for {@link VerdifaxClient.adminErase}. */
 export interface AdminEraseRequest {
   run_id: number;
@@ -793,6 +804,16 @@ export interface Account {
   chain_id: string;
   identity?: string;
   policy_scope?: string;
+  /** The second zone the account's reports show beside UTC: an IANA zone,
+   *  `"none"` for UTC alone, or empty for the zone of the server's region. */
+  time_zone?: string;
+}
+
+/** Returned by {@link VerdifaxClient.setAccountTimeZone}. */
+export interface AccountTimeZone {
+  ok: boolean;
+  account_id: string;
+  time_zone: string;
 }
 
 /** Returned by {@link VerdifaxClient.getAccount}. */
@@ -919,6 +940,47 @@ export interface RunPublication {
   signal: { signal_account: string; signal_sequence: number; signal_previous_hash: Hex64 };
   publication_hash: Hex64;
   /** The public-log anchor; absent while the entry is still being anchored. */
+  anchor?: unknown;
+}
+
+/** One successful run of an account, verdifax.run-sealed.v1: the entry of a
+ *  `run.sealed` feed event, sealed with its place in the account's signal
+ *  feed and anchored on the public log, so the feed lists every successful
+ *  run. `verdifax-verify --signals` reads it since v0.28.0. Save it as the
+ *  server sent it. */
+export interface RunSealedRecord {
+  format: string;
+  run_id: number;
+  /** The record's own hash, so the event binds the exact record. */
+  record_hash: Hex64;
+  /** The record's job and step, when it has one. */
+  job_id?: string;
+  step_id?: string;
+  sealed_at: string;
+  /** The event's place in the account's signal feed. */
+  signal: { signal_account: string; signal_sequence: number; signal_previous_hash: Hex64 };
+  run_sealed_hash: Hex64;
+  /** The public-log anchor; absent while the entry is still being anchored. */
+  anchor?: unknown;
+}
+
+/** A restore gap, verdifax.restore-gap.v1: after a restore from backup, one
+ *  of the account's chains (`signals`, `signoffs`, `policy` or
+ *  `account-policy`) skips places `lost_from` to `lost_to`, which may hold
+ *  entries the restore lost, so no place on the public log is ever reused.
+ *  It is the entry of a `chain.gap` feed event, sealed and anchored, and it
+ *  sits in its place in a sign-off or policy history. `verdifax-verify`
+ *  accepts a skip in a chain only through one, since v0.28.0. */
+export interface RestoreGapRecord {
+  format: "verdifax.restore-gap.v1";
+  chain: "signals" | "signoffs" | "policy" | "account-policy";
+  /** The key whose policy chain it is, for the `policy` chain only. */
+  key_id?: number;
+  lost_from: number;
+  lost_to: number;
+  recorded_at: string;
+  signal: { signal_account: string; signal_sequence: number; signal_previous_hash: Hex64 };
+  restore_gap_hash: Hex64;
   anchor?: unknown;
 }
 
@@ -1065,7 +1127,12 @@ export type SignalKind =
   | "key.created"
   | "key.revoked"
   | "run.published"
-  | "run.unpublished";
+  | "run.unpublished"
+  /** A restore from backup made one of the account's chains skip places its
+   *  entries may have held; the gap is sealed and on the public log. */
+  | "chain.gap"
+  /** A successful run, so the feed is a complete account ledger. */
+  | "run.sealed";
 
 /** The Verdifax event inside a {@link SignalEvent}, verdifax.signal.v1. */
 export interface SignalEventData {

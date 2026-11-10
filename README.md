@@ -67,7 +67,8 @@ if (v.verified) {
 | `client.exportRunsCSV(params)` | `GET /runs/export?format=csv` | required |
 | `client.getRunArtifacts(id)` | `GET /runs/{id}/artifacts` | required |
 | `client.getRunReport(id)` | `GET /runs/{id}/report` | required |
-| `client.downloadAuditPDF(id, format)` | `GET /runs/{id}/report.pdf` | required |
+| `client.downloadAuditPDF(id, format, { aiOutputText })` | `GET /runs/{id}/report.pdf`, or `POST` with the AI's answer, printed when its SHA-256 is the sealed hash | required |
+| `client.downloadPublicAuditPDF(token, format, { aiOutputText })` | `GET` or `POST /public/runs/{token}/report.pdf` | none |
 | `client.getAllowToken(id)` | `GET /runs/{id}/allow-token` | required |
 | `client.getDenyReceipt(id)` | `GET /runs/{id}/deny-receipt` | required |
 | `client.getCCVHaltReceipt(id)` | `GET /runs/{id}/ccv-halt-receipt` | required |
