@@ -251,7 +251,7 @@ await client.attest({
 await client.activatePolicy(earlierDocumentHash);
 
 // Save the chain of changes and check it with verdifax-verify --policy-history policy-history.json.
-writeFileSync("policy-history.json", JSON.stringify(await client.getPolicyHistory()));
+writeFileSync("policy-history.json", (await client.getPolicyHistory()).sealedJson);
 ```
 
 `uploadPolicy` sends the string it is given unchanged, because the server hashes the exact text, and it refuses anything that is not a string. `getPolicy` returns a stored document with its exact text. `testPolicy` takes exactly one of `document` and `documentHash`. `listPolicies` returns the documents, `chain_id`, the newest change as `newest_activation_hash` (64 zeros when there is none yet) and the document in force as `active_document_hash` (empty under the built-in policy).
@@ -295,7 +295,7 @@ await owner.activateAccountPolicy(stored.document_hash);
 
 // The owner exports the runs of every key in the account, with the account policy and its changes.
 const evidence = await owner.exportAccountRuns({ from: "2026-11-01T00:00:00Z", to: "2026-12-01T00:00:00Z" });
-writeFileSync("account-runs.json", JSON.stringify(evidence));
+writeFileSync("account-runs.json", evidence.sealedJson);
 ```
 
 An owner key cannot run anything. Every route that needs a key refuses it, apart from the `/account` routes, so give the member keys to the systems that run things.
@@ -338,10 +338,10 @@ const signOff = await member.signOff(
 console.log(signOff.sequence, signOff.signoff_hash);
 
 // Save the run's sign-offs and check them with verdifax-verify --signoff signoffs.json.
-writeFileSync("signoffs.json", JSON.stringify(await member.getSignOffs(1042)));
+writeFileSync("signoffs.json", (await member.getSignOffs(1042)).sealedJson);
 
 // The owner saves the account's whole chain for verdifax-verify --signoff-history.
-writeFileSync("signoff-history.json", JSON.stringify(await owner.getSignOffHistory()));
+writeFileSync("signoff-history.json", (await owner.getSignOffHistory()).sealedJson);
 ```
 
 An approver key is registered by the account's owner, and it is never a request key in the same account. The server refuses to register a key that is, so the key that requested a run cannot sign it off. `registerApprover` takes the approver's signing key, from which it makes the proof on this machine, or the `{ public_key, proof }` that `approverKeyProof` made on the approver's own machine, so the owner need not hold the approver's private key. It refuses a proof that does not verify before sending. `revokeApprover` revokes a key, and its earlier sign-offs stay on the record. `listApprovers` lists revoked keys too.
@@ -386,7 +386,7 @@ try {
 }
 
 // Save a page and check it with verdifax-verify --signals signals.json.
-writeFileSync("signals.json", JSON.stringify(await feed.getSignals({ limit: 500 })));
+writeFileSync("signals.json", (await feed.getSignals({ limit: 500 })).sealedJson);
 ```
 
 `followSignals` reads page after page and starts each read at the previous page's `next_after`, so it never skips an event, and it refuses a page that would skip or go back. When there is no new event, each read waits up to `wait` seconds (default 25) on the server. A failed read is retried like any GET. If it still fails, `followSignals` throws `SignalFeedError`, whose `lastSequence` is the last sequence it handed out and whose `cause` is the error the read threw. It runs until you stop it with `break` or `return`. `getSignals` reads one page: `after` is the last sequence read (default 0), `limit` is 1 to 500 and `wait` is 0 to 25 seconds. The timeout of a signals call is at least its wait plus 30 seconds, whatever the client's `timeoutMs`. Bad options are refused before anything is sent.
@@ -425,6 +425,10 @@ A webhook delivery is a copy: the pull feed and the public log are the record. A
 `signalEventHash(kind, entryHash, { account, sequence, previousSignalHash })` recomputes an event's `event_hash`, the hash the next event names. It makes no request.
 
 `verdifax-verify --signals FILE` checks a saved feed: each entry as its own kind, that the place each entry seals is the event's place, and that the numbers and links run without a gap.
+
+## Exact records
+
+Every object and list the SDK parses from the server's JSON answer carries `sealedJson`: its exact text as the server sent it. A method that returns part of an answer, such as the `activation` of a policy change or the `runs` of a run list, returns that part with its own `sealedJson`. Methods that return text, such as `getRunArtifacts` and the CSV exports, return it exactly. JavaScript rounds a number above 2^53, so a record parsed and written back with `JSON.stringify` could stop matching its hash; `sealedJson` keeps every field and every digit. Save `sealedJson` for `verdifax-verify`. It is read-only and not enumerable, so `JSON.stringify`, `Object.keys` and spreading never include it. `parseSealed(text)` reads text you hold, such as a saved file, the same way.
 
 ## Evidence export
 

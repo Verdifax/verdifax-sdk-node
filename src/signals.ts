@@ -15,6 +15,7 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 
 import { SignalFeedError, VerdifaxError } from "./errors.js";
+import { parseSealed } from "./sealed.js";
 import type {
   CreateWebhookOptions,
   FollowSignalsOptions,
@@ -67,6 +68,7 @@ const SIGNAL_KINDS: readonly SignalKind[] = Object.freeze([
   "run.unpublished",
   "chain.gap",
   "run.sealed",
+  "chain.interrupted",
 ]);
 
 /** A read of the feed: the path with its query and the timeout to use. */
@@ -335,7 +337,8 @@ export function verifyWebhook(
 
   let event: unknown;
   try {
-    event = JSON.parse(raw.toString("utf8"));
+    // The event keeps the exact text it was signed as, in sealedJson.
+    event = parseSealed(raw.toString("utf8"));
   } catch {
     throw new VerdifaxError(
       "verdifax: webhook check failed: the signature matches but the body is not JSON",

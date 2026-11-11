@@ -11,6 +11,8 @@
 
 export { MAX_BATCH_ROWS, VerdifaxClient } from "./client.js";
 export { VerdifaxJob } from "./job.js";
+export { parseSealed } from "./sealed.js";
+export type { Sealed, SealedList } from "./sealed.js";
 export { fromEnv } from "./config.js";
 export { captureEnvironment } from "./environment.js";
 export { EXECUTE_FIELDS, formatProviderPayload } from "./helpers.js";
@@ -131,6 +133,7 @@ export type {
   RequestSignatureV2,
   ReproducibilityContext,
   RestoreGapRecord,
+  ChainInterruptedRecord,
   Run,
   RunSealedRecord,
   RunsExport,

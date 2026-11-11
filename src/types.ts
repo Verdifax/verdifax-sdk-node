@@ -984,6 +984,29 @@ export interface RestoreGapRecord {
   anchor?: unknown;
 }
 
+/** An interrupted record, verdifax.chain-interrupted.v1: a sign-off or
+ *  policy change took place `place` of its chain (`signoffs`, `policy` or
+ *  `account-policy`), and the public log never confirmed its entry. The
+ *  record closes that place and names the record that was being logged and
+ *  the leaf its entry would carry, so an entry the log may hold is still
+ *  named. It is the entry of a `chain.interrupted` feed event, sealed and
+ *  anchored, and it sits in its place in a sign-off or policy history.
+ *  `verdifax-verify` accepts a skipped place only through one, since v0.29.0. */
+export interface ChainInterruptedRecord {
+  format: "verdifax.chain-interrupted.v1";
+  chain: "signoffs" | "policy" | "account-policy";
+  /** The key whose policy chain it is, for the `policy` chain only. */
+  key_id?: number;
+  place: number;
+  record_kind: "signoff" | "policy_activation";
+  planned_record_hash: Hex64;
+  planned_leaf: Hex64;
+  recorded_at: string;
+  signal: { signal_account: string; signal_sequence: number; signal_previous_hash: Hex64 };
+  interrupted_hash: Hex64;
+  anchor?: unknown;
+}
+
 /** The answer to {@link VerdifaxClient.publishRun} and
  *  {@link VerdifaxClient.unpublishRun}: the run's public state, its links
  *  while public, and the publication the call sealed, null when the run was
@@ -1132,7 +1155,11 @@ export type SignalKind =
    *  entries may have held; the gap is sealed and on the public log. */
   | "chain.gap"
   /** A successful run, so the feed is a complete account ledger. */
-  | "run.sealed";
+  | "run.sealed"
+  /** A sign-off or policy change the public log never confirmed: its place
+   *  in its chain is closed by a sealed, anchored record naming the entry it
+   *  would have made. */
+  | "chain.interrupted";
 
 /** The Verdifax event inside a {@link SignalEvent}, verdifax.signal.v1. */
 export interface SignalEventData {

@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.11.0
+
+Interrupted sign-offs and policy changes, exact records, and time limits.
+
+- The signal feed carries a new kind, `chain.interrupted` (`ChainInterruptedRecord`): a sign-off or policy change whose public-log entry was never confirmed has its place closed by a sealed, anchored record naming the entry it would have made. `verdifax-verify --signals`, `--signoff-history` and `--policy-history` accept a skipped place through one since v0.29.0. `getSignOffHistory`, `getPolicyHistory` and `getAccountPolicyHistory` return lists that may hold restore gaps and interrupted records in place.
+- Every object and list the SDK parses from the server's JSON answer carries `sealedJson`, its exact text as the server sent it, read-only and never written by `JSON.stringify`. JavaScript rounds a number above 2^53, so save `sealedJson` for `verdifax-verify`; the README's examples do. `parseSealed(text)` reads text you hold the same way, and the types `Sealed` and `SealedList` describe it.
+- Each test has a 60-second limit, and every CI job has its own time limit.
+
 ## 1.10.0
 
 Successful runs in the feed, restore gaps, a required AI review, reports that print the AI's answer, and the account's time zone.

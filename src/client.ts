@@ -26,6 +26,7 @@ import {
   withExecuteFlags,
 } from "./helpers.js";
 import { VerdifaxJob } from "./job.js";
+import { parseSealed, type Sealed, type SealedList } from "./sealed.js";
 import {
   deliveriesPath,
   FEED_KEYS_PATH,
@@ -104,6 +105,7 @@ import type {
   SignOffRecord,
   AccountTimeZone,
   RestoreGapRecord,
+  ChainInterruptedRecord,
   PublicationResult,
   SignOffTarget,
   VerdifaxVersion,
@@ -409,12 +411,12 @@ export class VerdifaxClient {
       { runs: sent },
     );
     if (!Array.isArray(out?.results)) return out;
-    return {
-      ...out,
-      results: out.results.map((row, i) =>
-        i < sent.length ? withSignedText(row, sent[i]!) : row,
-      ),
-    };
+    // Each parsed row takes its signed text in place, so the answer, its
+    // list and its rows keep their sealedJson.
+    out.results.forEach((row, i) => {
+      if (i < sent.length) withSignedText(row, sent[i]!);
+    });
+    return out;
   }
 
   /** High-level convenience wrapper around `execute()`. Accepts
@@ -583,11 +585,14 @@ export class VerdifaxClient {
 
   /** This key's policy changes, oldest first, as the list the server sends.
    *  Save it as JSON, for example with
-   *  `writeFileSync("policy-history.json", JSON.stringify(history))`, and
-   *  check it with `verdifax-verify --policy-history policy-history.json`. */
-  async getPolicyHistory(): Promise<PolicyActivation[]> {
+   *  `writeFileSync("policy-history.json", history.sealedJson)`, the exact
+   *  text the server sent, and
+   *  check it with `verdifax-verify --policy-history policy-history.json`.
+   *  A place a restore skipped holds a restore gap, and a place whose change
+   *  the public log never confirmed holds an interrupted record. */
+  async getPolicyHistory(): Promise<SealedList<PolicyActivation | RestoreGapRecord | ChainInterruptedRecord>> {
     this.requireAPIKey();
-    return this.request<PolicyActivation[]>("GET", `${POLICIES_PATH}/history`);
+    return this.request<SealedList<PolicyActivation | RestoreGapRecord | ChainInterruptedRecord>>("GET", `${POLICIES_PATH}/history`);
   }
 
   /** Makes a stored document the policy in force and returns the change
@@ -762,7 +767,7 @@ export class VerdifaxClient {
       "GET",
       `${ACCOUNT_PATH}/keys`,
     );
-    return { ...out, keys: out?.keys ?? [] };
+    return withList(out, "keys");
   }
 
   /** Revokes one of the account's member keys. A key in another account,
@@ -807,9 +812,9 @@ export class VerdifaxClient {
    *  the runs its keys made through Verdifax, not runs made elsewhere. */
   async exportAccountRuns(
     params: ExportRunsParams = {},
-  ): Promise<AccountRunsExport> {
+  ): Promise<Sealed<AccountRunsExport>> {
     this.requireAPIKey();
-    return this.request<AccountRunsExport>(
+    return this.request<Sealed<AccountRunsExport>>(
       "GET",
       this.exportPath(`${ACCOUNT_PATH}/runs/export`, params, "json"),
     );
@@ -848,10 +853,11 @@ export class VerdifaxClient {
   }
 
   /** The account's policy changes, oldest first, in the form
-   *  `verdifax-verify --policy-history FILE` reads. */
-  async getAccountPolicyHistory(): Promise<PolicyActivation[]> {
+   *  `verdifax-verify --policy-history FILE` reads, with restore gaps and
+   *  interrupted records in the places they close. */
+  async getAccountPolicyHistory(): Promise<SealedList<PolicyActivation | RestoreGapRecord | ChainInterruptedRecord>> {
     this.requireAPIKey();
-    return this.request<PolicyActivation[]>(
+    return this.request<SealedList<PolicyActivation | RestoreGapRecord | ChainInterruptedRecord>>(
       "GET",
       `${ACCOUNT_POLICIES_PATH}/history`,
     );
@@ -936,7 +942,7 @@ export class VerdifaxClient {
   async listApprovers(): Promise<ApproverList> {
     this.requireAPIKey();
     const out = await this.request<ApproverList>("GET", APPROVERS_PATH);
-    return { ...out, approvers: out?.approvers ?? [] };
+    return withList(out, "approvers");
   }
 
   /** Revokes one of the account's approver keys. Its earlier sign-offs
@@ -1088,29 +1094,30 @@ export class VerdifaxClient {
   async getSignOffs(
     runId: number,
     options: AsOwnerOptions = {},
-  ): Promise<SignOffRecord[]> {
+  ): Promise<SealedList<SignOffRecord>> {
     this.requireAPIKey();
     requirePositiveId(runId, "runId");
     const base = asOwnerOf(options, "getSignOffs")
       ? `${ACCOUNT_PATH}/runs`
       : "/runs";
     return (
-      (await this.request<SignOffRecord[]>(
+      (await this.request<SealedList<SignOffRecord>>(
         "GET",
         `${base}/${runId}/signoffs`,
-      )) ?? []
+      )) ?? parseSealed("[]")
     );
   }
 
   /** The account's whole chain of sign-offs, oldest first, in the form
-   *  `verdifax-verify --signoff-history FILE` reads. Needs the owner key. */
-  async getSignOffHistory(): Promise<(SignOffRecord | RestoreGapRecord)[]> {
+   *  `verdifax-verify --signoff-history FILE` reads, with restore gaps and
+   *  interrupted records in the places they close. Needs the owner key. */
+  async getSignOffHistory(): Promise<SealedList<SignOffRecord | RestoreGapRecord | ChainInterruptedRecord>> {
     this.requireAPIKey();
     return (
-      (await this.request<(SignOffRecord | RestoreGapRecord)[]>(
+      (await this.request<SealedList<SignOffRecord | RestoreGapRecord | ChainInterruptedRecord>>(
         "GET",
         `${ACCOUNT_SIGNOFFS_PATH}/history`,
-      )) ?? []
+      )) ?? parseSealed("[]")
     );
   }
 
@@ -1129,17 +1136,22 @@ export class VerdifaxClient {
    *  `asOwner` it reads GET /account/signals with the owner key. Bad
    *  options are refused before sending. Save the events and check them
    *  with `verdifax-verify --signals`. */
-  async getSignals(options: GetSignalsOptions = {}): Promise<SignalPage> {
+  async getSignals(options: GetSignalsOptions = {}): Promise<Sealed<SignalPage>> {
     this.requireAPIKey();
     const read = signalsRead(options, "getSignals", this.timeoutMs);
-    const out = await this.request<SignalPage>(
+    const out = await this.request<Sealed<SignalPage>>(
       "GET",
       read.path,
       undefined,
       false,
       read.timeoutMs,
     );
-    return { ...out, events: out?.events ?? [] };
+    // The page keeps its exact text; an absent list reads as empty, and
+    // anything else is left for the follower to refuse.
+    if (out && (out.events === undefined || out.events === null)) {
+      out.events = parseSealed<SealedList<SignalEvent>>("[]");
+    }
+    return out;
   }
 
   /** Follows the feed from `after`, yielding each event once, in order,
@@ -1207,7 +1219,7 @@ export class VerdifaxClient {
   async listWebhooks(): Promise<WebhookList> {
     this.requireAPIKey();
     const out = await this.request<WebhookList>("GET", WEBHOOKS_PATH);
-    return { ...out, webhooks: out?.webhooks ?? [] };
+    return withList(out, "webhooks");
   }
 
   /** Ends a webhook subscription. Its events stay in the pull feed. */
@@ -1229,7 +1241,7 @@ export class VerdifaxClient {
       "GET",
       deliveriesPath(id, options),
     );
-    return { ...out, deliveries: out?.deliveries ?? [] };
+    return withList(out, "deliveries");
   }
 
   // ── Runs ──────────────────────────────────────────────────────
@@ -1272,7 +1284,7 @@ export class VerdifaxClient {
       runs: RunSummary[];
       total: number;
     }>("GET", path);
-    return { runs: out.runs ?? [], total: out.total ?? 0 };
+    return { runs: out.runs ?? parseSealed("[]"), total: out.total ?? 0 };
   }
 
   /** Searches this key's runs. `manifest_hash` matches a prefix. The
@@ -1308,16 +1320,16 @@ export class VerdifaxClient {
       runs: RunSummary[];
       total: number;
     }>("GET", path);
-    return { runs: out.runs ?? [], total: out.total ?? 0 };
+    return { runs: out.runs ?? parseSealed("[]"), total: out.total ?? 0 };
   }
 
   /** Lists what the server holds for this key in a period, failures
    *  included, up to 10,000 rows. `truncated` is true when the period
    *  holds more. The list states what was stored, not a verdict, and a
    *  call that never reached Verdifax cannot appear in it. */
-  async exportRuns(params: ExportRunsParams = {}): Promise<RunsExport> {
+  async exportRuns(params: ExportRunsParams = {}): Promise<Sealed<RunsExport>> {
     this.requireAPIKey();
-    return this.request<RunsExport>(
+    return this.request<Sealed<RunsExport>>(
       "GET",
       this.exportPath("/runs/export", params, "json"),
     );
@@ -1584,7 +1596,7 @@ export class VerdifaxClient {
       count: number;
       receipts: DeletionReceipt[];
     }>("GET", `/runs/${runId}/deletion-receipts`);
-    return out.receipts ?? [];
+    return out.receipts ?? parseSealed("[]");
   }
 
   async adminErase(req: AdminEraseRequest): Promise<DeletionReceipt> {
@@ -1660,7 +1672,7 @@ export class VerdifaxClient {
       "GET",
       "/admin/accounts",
     );
-    return out?.accounts ?? [];
+    return out?.accounts ?? parseSealed("[]");
   }
 
   async adminListKeys(): Promise<AdminAPIKey[]> {
@@ -1669,7 +1681,7 @@ export class VerdifaxClient {
       "GET",
       "/admin/keys",
     );
-    return out.keys ?? [];
+    return out.keys ?? parseSealed("[]");
   }
 
   async adminRevokeKey(keyId: number): Promise<void> {
@@ -1864,7 +1876,10 @@ export class VerdifaxClient {
       if (rawText) return { text, headers: resp.headers } as T;
       if (text.length === 0) return undefined as T;
       try {
-        return JSON.parse(text) as T;
+        // Every object and list keeps the exact text the server sent, in
+        // sealedJson, so no sealed record is rounded or loses a field
+        // (round 57, N5).
+        return parseSealed<T>(text);
       } catch (err) {
         throw new VerdifaxError(
           `verdifax: failed to decode response body at ${path}: ${
@@ -1990,7 +2005,25 @@ function withSignedText<T>(
   result: T,
   sent: ExecuteRequest | SignedRequestBody,
 ): T {
-  return "signed_request" in sent
-    ? { ...result, signed_request: sent.signed_request }
-    : result;
+  if (!("signed_request" in sent)) return result;
+  // The parsed result keeps its sealedJson: the text is added to it, not
+  // copied into a new object.
+  if (result !== null && typeof result === "object") {
+    (result as Record<string, unknown>).signed_request = sent.signed_request;
+    return result;
+  }
+  // No answer body: the text alone, as before.
+  return { signed_request: sent.signed_request } as T;
+}
+
+/** The parsed answer with an absent list read as empty. The answer itself
+ *  is returned, so it keeps the server's exact text in sealedJson. */
+function withList<T extends object, K extends keyof T>(out: T, field: K): T {
+  if (out === undefined || out === null) {
+    return { [field]: parseSealed("[]") } as unknown as T;
+  }
+  if (out[field] === undefined || out[field] === null) {
+    (out as Record<K, unknown>)[field] = parseSealed("[]");
+  }
+  return out;
 }

@@ -583,3 +583,61 @@ test("the sign-off types are exported", () => {
     }
   }
 });
+
+// Round 57, N5: JSON.parse rounds a number above 2^53, so every chain record
+// and its list keep the exact text the server sent, in a read-only sealedJson
+// that JSON.stringify never writes. Saving sealedJson gives the verifier the
+// server's bytes, whatever the record holds.
+test("sign-off and policy histories and the feed keep the server's exact text, past 2^53", async () => {
+  const big = "9007199254740993";
+  const recordText = `{"format":"verdifax.signoff.v1","sequence":1,"a_later_count":${big},"signal":{"signal_account":"account-7","signal_sequence":5,"signal_previous_hash":"${"0".repeat(64)}"}}`;
+  const listText = `[ ${recordText} ,\n {"format":"verdifax.restore-gap.v1","lost_from":2,"lost_to":102} ]`;
+  for (const [name, call, text] of [
+    ["getSignOffHistory", (c) => c.getSignOffHistory(), listText],
+    ["getSignOffs", (c) => c.getSignOffs(42), listText],
+    ["getPolicyHistory", (c) => c.getPolicyHistory(), listText],
+    ["getAccountPolicyHistory", (c) => c.getAccountPolicyHistory(), listText],
+  ]) {
+    const { result } = await withServer(() => ({ text }), call, { apiKey: "owner" });
+    assert.equal(result.sealedJson, text, `${name}: the list keeps the exact text`);
+    assert.equal(result[0].sealedJson, recordText, `${name}: each record keeps its exact text`);
+    assert.ok(result[0].sealedJson.includes(big), `${name}: the number past 2^53 is exact in sealedJson`);
+    assert.equal(result[0].a_later_count, 9007199254740992, `${name}: the parsed field is rounded, as JSON.parse rounds it`);
+    assert.ok(!JSON.stringify(result).includes("sealedJson") && !Object.keys(result[0]).includes("sealedJson"),
+      `${name}: sealedJson is never written by JSON.stringify`);
+    assert.throws(() => { "use strict"; result[0].sealedJson = "{}"; }, TypeError, `${name}: sealedJson is read-only`);
+  }
+  const eventText = `{"id":"e1","data":{"sequence":1,"kind":"run.sealed","entry":${recordText}}}`;
+  const pageText = `{"events":[${eventText}],"next_after":1,"newest":1}`;
+  const { result: page } = await withServer(() => ({ text: pageText }), (c) => c.getSignals(), { apiKey: "feed" });
+  assert.equal(page.sealedJson, pageText);
+  assert.equal(page.events[0].sealedJson, eventText);
+  assert.equal(page.events[0].data.entry.sealedJson, recordText);
+});
+
+test("parseSealed reads every value as JSON.parse does and refuses what it refuses", async () => {
+  const { parseSealed } = await import("../dist/index.mjs");
+  for (const text of [
+    `{"a":"\\"quoted\\" \\\\ \\u00e9 \\ud83d\\ude00 ]}","b":[1,-2.5e3,true,false,null,{}],"c":{"d":[[]]}}`,
+    `  [ 1 , { "x" : "y" } , "z" ]  `,
+    `{"__proto__":{"polluted":true},"dup":1,"dup":2}`,
+    `"text"`, `42`, `null`, `[]`, `{}`,
+  ]) {
+    assert.deepEqual(parseSealed(text), JSON.parse(text), text);
+  }
+  assert.equal(Object.getPrototypeOf(parseSealed(`{"__proto__":{"polluted":true}}`)), Object.prototype);
+  assert.equal(parseSealed(`{"a":[1,{"b":2}]}`).a[1].sealedJson, `{"b":2}`);
+  for (const bad of [`{"a":1,}`, `[1,]`, `{"a" 1}`, `[01]`, `{"a":1} x`, `'a'`, `{"a":"\\x"}`, `[`, `{"a":`, ``, `[1 2]`, `{a:1}`, `NaN`]) {
+    assert.throws(() => JSON.parse(bad), SyntaxError, `JSON.parse must refuse ${bad}`);
+    assert.throws(() => parseSealed(bad), /not valid/, `parseSealed must refuse ${bad}`);
+  }
+});
+
+// Round 57, N5: a parsed answer rebuilt with a spread loses its sealedJson
+// (round 57 found four list methods and the signed-execute result doing
+// so). The client's source is read for any spread of a value it parsed.
+test("no method rebuilds a parsed answer with a spread", () => {
+  const src = readFileSync(new URL("../src/client.ts", import.meta.url), "utf8");
+  const spreads = [...src.matchAll(/\{\s*\.\.\.\(?\s*(out|result|res|reply|body|page|record)\b/g)].map((m) => m[0]);
+  assert.deepEqual(spreads, [], `spreads drop sealedJson: ${spreads.join(", ")}`);
+});
