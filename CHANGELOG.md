@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.12.0
+
+Data-quality declarations, pending sign-offs, public sign-offs, and requests read strictly.
+
+- `policy_context` takes `data_quality`: where the data came from (`source`), the time it describes (`as_of`, read as strictly as the server reads it) and the checks you ran on it (`checks`, each a `name` and a `result` of `pass`, `fail` or `warn`). It is sealed with the other policy values, and a policy's `data_quality` condition can require and test it. Verdifax judges none of it. The SDK checks it before sending, with the shared data-quality vector every SDK and the server test.
+- `pendingSignOffs(events)` lists, in feed order, the runs whose allowing rule requires a person's sign-off and on which no approval is in force. It makes no request.
+- `getPublicSignOff(id)` and `getPublicSignOffByToken(token)` read the sign-off a published run's audit report prints, and for a step of a job, the job's decision in force. No API key needed. Types `PublicSignOff`, `PublicJobSignOff` and `PublicSignOffAnswer`.
+- `downloadAuditPDF` and `downloadPublicAuditPDF` take `{ fallback: "comprehensive" }`. The server now refuses a report format it does not know with an `APIError` (400); the fallback asks for the comprehensive report instead.
+- `listRuns`, `searchRuns`, `listAccountRuns` and `listAttestations` take `lenient`. The server now refuses a value it cannot read, such as a date in `searchRuns`, with an `APIError` (400); `lenient: true` asks it to ignore or replace the value instead.
+- The user agent is `verdifax-sdk-node/1.12.0`.
+
 ## 1.11.0
 
 Interrupted sign-offs and policy changes, exact records, and time limits.

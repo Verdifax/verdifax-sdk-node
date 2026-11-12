@@ -741,3 +741,23 @@ test("the signal feed types and functions are exported", () => {
     }
   }
 });
+
+// Round 58, B7: a run whose rule requires a sign-off is pending until the
+// last sign-off on its record is an approval.
+test("pendingSignOffs lists required runs without an approval in force", async () => {
+  const { pendingSignOffs } = await import("../dist/index.js");
+  const ev = (seq, kind, entry) => ({ id: `account-7/${seq}`, data: { kind, sequence: seq, entry } });
+  const signOff = (run, decision, kind) => ({ decision, target: { kind, run_id: run } });
+  const events = [
+    ev(1, "run.sealed", { run_id: 10, signoff_required: true }),
+    ev(2, "run.sealed", { run_id: 11 }),
+    ev(3, "run.sealed", { run_id: 12, signoff_required: true }),
+    ev(4, "run.sealed", { run_id: 13, signoff_required: true }),
+    ev(5, "signoff.recorded", signOff(10, "approve", "record")),
+    ev(6, "signoff.recorded", signOff(12, "approve", "record")),
+    ev(7, "signoff.recorded", signOff(12, "reject", "record")),
+    ev(8, "signoff.recorded", signOff(13, "approve", "receipt")),
+  ];
+  assert.deepEqual(pendingSignOffs(events), [12, 13]);
+  assert.throws(() => pendingSignOffs([ev(1, "run.sealed", {})]));
+});

@@ -12,6 +12,12 @@ function startReportMock(seen) {
     req.on("end", () => {
       const body = raw ? JSON.parse(raw) : null;
       seen.push({ method: req.method, url: req.url, body });
+      const q = new URL(req.url, "http://x").searchParams;
+      if (q.get("format") === "breif" && !q.get("fallback")) {
+        res.statusCode = 400;
+        res.setHeader("Content-Type", "application/json");
+        return res.end(JSON.stringify({ error: 'unknown report format "breif": use brief, auditor, legal or comprehensive' }));
+      }
       if (body && body.ai_output_text === "wrong") {
         res.statusCode = 422;
         res.setHeader("Content-Type", "application/json");
@@ -51,6 +57,31 @@ test("reports carry the answer when given, and the public report goes by token",
     await assert.rejects(c.downloadPublicAuditPDF(""), VerdifaxError);
     const anonymous = new VerdifaxClient({ baseURL: mock.url });
     await anonymous.downloadPublicAuditPDF("tok");
+  } finally {
+    mock.close();
+  }
+});
+
+// A format the server does not know is refused with the server's reason,
+// unless the caller asked for the comprehensive report as the fallback.
+test("a report format fallback is the caller's choice", async () => {
+  const seen = [];
+  const mock = await startReportMock(seen);
+  try {
+    const c = new VerdifaxClient({ baseURL: mock.url, apiKey: "k" });
+    await assert.rejects(c.downloadAuditPDF(7, "breif"), (err) => {
+      assert.ok(err instanceof APIError);
+      assert.equal(err.status, 400);
+      assert.match(err.message, /brief, auditor, legal or comprehensive/);
+      return true;
+    });
+    await c.downloadAuditPDF(7, "breif", { fallback: "comprehensive" });
+    await c.downloadPublicAuditPDF("tok", "breif", { fallback: "comprehensive", aiOutputText: "the answer" });
+    assert.deepEqual(seen, [
+      { method: "GET", url: "/runs/7/report.pdf?format=breif", body: null },
+      { method: "GET", url: "/runs/7/report.pdf?format=breif&fallback=comprehensive", body: null },
+      { method: "POST", url: "/public/runs/tok/report.pdf", body: { format: "breif", fallback: "comprehensive", ai_output_text: "the answer" } },
+    ]);
   } finally {
     mock.close();
   }

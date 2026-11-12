@@ -82,6 +82,7 @@ import type {
   NewestSignOff,
   PDFFormat,
   AuditPDFOptions,
+  PublicSignOffAnswer,
   Policy,
   PolicyActivation,
   PolicyActivationSignature,
@@ -228,6 +229,8 @@ interface RawResponse {
  * | `getPublicBundle(id)` | GET /runs/{id}/bundle.json | none |
  * | `getPublicBundleByToken(token)` | GET /public/runs/{token}/bundle.json | none |
  * | `getPublicReceiptByToken(token)` | GET /public/runs/{token}/receipt.json | none |
+ * | `getPublicSignOff(id)` | GET /runs/{id}/signoff.json | none |
+ * | `getPublicSignOffByToken(token)` | GET /public/runs/{token}/signoff.json | none |
  * | `executeBatch(runs)` | POST /execute/batch | required |
  * | `verifyDeterminism(req)` | POST /execute/verify-determinism | required |
  * | `downloadAuditPDF(id, format, { aiOutputText })` | GET or POST /runs/{id}/report.pdf | required |
@@ -1277,6 +1280,7 @@ export class VerdifaxClient {
     if (params.offset && params.offset > 0) {
       q.set("offset", String(params.offset));
     }
+    if (params.lenient) q.set("lenient", "1");
     const qs = q.toString();
     const path = qs ? `${base}?${qs}` : base;
     const out = await this.request<{
@@ -1287,9 +1291,9 @@ export class VerdifaxClient {
     return { runs: out.runs ?? parseSealed("[]"), total: out.total ?? 0 };
   }
 
-  /** Searches this key's runs. `manifest_hash` matches a prefix. The
-   *  server ignores a `from` or `to` it cannot parse here, unlike
-   *  {@link exportRuns}, which refuses one. */
+  /** Searches this key's runs. `manifest_hash` matches a prefix. A
+   *  `from` or `to` the server cannot read throws an APIError (400) unless
+   *  `lenient` is set, which asks the server to leave it out instead. */
   async searchRuns(params: SearchRunsParams = {}): Promise<{
     runs: RunSummary[];
     total: number;
@@ -1313,6 +1317,7 @@ export class VerdifaxClient {
     if (params.offset && params.offset > 0) {
       q.set("offset", String(params.offset));
     }
+    if (params.lenient) q.set("lenient", "1");
     const qs = q.toString();
     const path = qs ? `/runs/search?${qs}` : "/runs/search";
     const out = await this.request<{
@@ -1391,6 +1396,7 @@ export class VerdifaxClient {
     if (params.offset && params.offset > 0) {
       q.set("offset", String(params.offset));
     }
+    if (params.lenient) q.set("lenient", "1");
     const qs = q.toString();
     return this.request<AttestationList>(
       "GET",
@@ -1491,6 +1497,24 @@ export class VerdifaxClient {
     return (await this.requestRaw(path)).text;
   }
 
+  /** The sign-off a published run's audit report prints: the decision in
+   *  force, and for a step of a job the job's decision on its final step.
+   *  Needs no API key. */
+  async getPublicSignOffByToken(token: string): Promise<PublicSignOffAnswer> {
+    if (!token) throw new VerdifaxError("verdifax: token is required");
+    return this.request<PublicSignOffAnswer>(
+      "GET",
+      `/public/runs/${encodeURIComponent(token)}/signoff.json`,
+    );
+  }
+
+  /** {@link getPublicSignOffByToken} for a run made public before share
+   *  tokens, by its number. Needs no API key. */
+  async getPublicSignOff(runId: number): Promise<PublicSignOffAnswer> {
+    if (runId <= 0) throw new VerdifaxError("verdifax: runId must be > 0");
+    return this.request<PublicSignOffAnswer>("GET", `/runs/${runId}/signoff.json`);
+  }
+
   private async getRunArtifact(
     runId: number,
     suffix: string,
@@ -1506,7 +1530,8 @@ export class VerdifaxClient {
   // ── Audit PDF (auth) ─────────────────────────────────────────
 
   /** Streams the audit PDF bytes as a Buffer. Format defaults to
-   *  "comprehensive" when not specified. With `aiOutputText`, the AI's
+   *  "comprehensive" when not specified; a format the server does not know
+   *  throws an APIError (400) unless `fallback: "comprehensive"` is set. With `aiOutputText`, the AI's
    *  exact answer, the report prints it on its first page, marked as
    *  supplied by the caller, only when its SHA-256 is the hash the record
    *  seals; other text throws an APIError (422). Verdifax stores only the
@@ -1551,11 +1576,18 @@ export class VerdifaxClient {
     if (this.apiKey) headers[HEADER_API_KEY] = this.apiKey;
     let path = base;
     let body: string | undefined;
+    const fallback = options.fallback;
     if (answer === undefined) {
-      path += `?format=${encodeURIComponent(format)}`;
+      const query = new URLSearchParams({ format });
+      if (fallback !== undefined) query.set("fallback", fallback);
+      path += `?${query.toString()}`;
     } else {
       headers["Content-Type"] = "application/json";
-      body = JSON.stringify({ format, ai_output_text: answer });
+      body = JSON.stringify(
+        fallback === undefined
+          ? { format, ai_output_text: answer }
+          : { format, fallback, ai_output_text: answer },
+      );
     }
 
     const controller = new AbortController();

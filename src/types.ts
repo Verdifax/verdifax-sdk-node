@@ -129,7 +129,32 @@ export interface PolicyContext {
   /** At most 256 bytes of UTF-8. */
   object_id?: string;
   classification?: PolicyClassification;
+  /** Your declaration about the data the decision used: where it came
+   *  from, the time it describes and the checks you ran on it. It is sealed
+   *  with the policy inputs, and a rule's data_quality condition can
+   *  require and test it. Verdifax judges none of it. */
+  data_quality?: DataQuality;
 }
+
+/** A request's declaration about the data its decision used. */
+export interface DataQuality {
+  /** At most 200 bytes of UTF-8. */
+  source?: string;
+  /** A time such as 2026-11-11T09:00:00Z or 2026-11-11T09:00:00+05:30. */
+  as_of?: string;
+  /** At most 50 checks, each with a distinct name. */
+  checks?: DataCheck[];
+}
+
+/** One named check you ran on the data, and its result. */
+export interface DataCheck {
+  /** At most 100 bytes of UTF-8, not only spaces. */
+  name: string;
+  result: DataCheckResult;
+}
+
+/** The result of one data check. */
+export type DataCheckResult = "pass" | "fail" | "warn";
 
 // ── Policies ────────────────────────────────────────────────────
 
@@ -563,6 +588,9 @@ export interface JobStepOptions extends Omit<AttestRequest, "job"> {
 export interface ListRunsParams {
   limit?: number;
   offset?: number;
+  /** Asks the server to ignore or replace a value it cannot read instead
+   *  of refusing the request with an APIError (400). */
+  lenient?: boolean;
 }
 
 /** Lightweight projection used in `/runs` and `/runs/search`
@@ -595,6 +623,9 @@ export interface SearchRunsParams {
   to?: string;
   limit?: number;
   offset?: number;
+  /** Asks the server to ignore or replace a value it cannot read instead
+   *  of refusing the request with an APIError (400). */
+  lenient?: boolean;
 }
 
 /** Period for {@link VerdifaxClient.exportRuns} and
@@ -681,6 +712,9 @@ export interface RunsExportCSV {
 export interface ListAttestationsParams {
   limit?: number;
   offset?: number;
+  /** Asks the server to ignore or replace a value it cannot read instead
+   *  of refusing the request with an APIError (400). */
+  lenient?: boolean;
 }
 
 /** Body returned by GET /attestations. Each row is a receipt as the
@@ -708,11 +742,54 @@ export interface RunStats {
 /** Audit-PDF format selector. */
 export type PDFFormat = "brief" | "auditor" | "legal" | "comprehensive";
 
+/** One sign-off as a published record shows it. */
+export interface PublicSignOff {
+  decision: string;
+  /** The sign-off's place in the account's sign-off chain. */
+  sequence: number;
+  signed_at: string;
+  /** True when the sign-off seals a note by its hash; the note is not served. */
+  note_sealed: boolean;
+}
+
+/** The sign-off of the job a published step belongs to, recorded on the
+ *  job's final step. `read` is false when it could not be read. */
+export interface PublicJobSignOff {
+  job_id: string;
+  step_id: string;
+  final: boolean;
+  read: boolean;
+  final_run_id?: number;
+  final_run_public_url?: string;
+  signoffs: PublicSignOff[];
+}
+
+/** The sign-off a published run's audit report prints. `read` is false
+ *  when the run's sign-offs could not be read. The note, the approver key
+ *  and the signatures are not served; `verdifax-verify --signoff` checks
+ *  them from the account's sign-off records. */
+export interface PublicSignOffAnswer {
+  ok: boolean;
+  run_id: number;
+  read: boolean;
+  signoffs: PublicSignOff[];
+  job?: PublicJobSignOff;
+  decision_in_force: {
+    decision: string;
+    run_id: number;
+    on: "this_record" | "job_final_step";
+  } | null;
+}
+
 /** Options of an audit PDF request. `aiOutputText` is the AI's exact
  *  answer: the report prints it, marked as supplied by the caller, only
- *  when its SHA-256 is the hash the record seals. */
+ *  when its SHA-256 is the hash the record seals. `fallback:
+ *  "comprehensive"` asks for the comprehensive report when the format is
+ *  not one of the four names; without it, a format the server does not
+ *  know is refused with an APIError (400) that lists the four names. */
 export interface AuditPDFOptions {
   aiOutputText?: string;
+  fallback?: "comprehensive";
 }
 
 /** Body shape for {@link VerdifaxClient.adminErase}. */

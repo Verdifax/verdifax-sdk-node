@@ -40,7 +40,7 @@ export {
   signRequest,
   signRequestV2,
 } from "./signing.js";
-export { signalEventHash, verifyWebhook } from "./signals.js";
+export { pendingSignOffs, signalEventHash, verifyWebhook } from "./signals.js";
 export {
   validateHex64,
   validateJobName,
@@ -114,12 +114,18 @@ export type {
   NewestSignOff,
   PDFFormat,
   AuditPDFOptions,
+  PublicSignOff,
+  PublicJobSignOff,
+  PublicSignOffAnswer,
   Policy,
   PolicyActivation,
   PolicyActivationSignature,
   PolicyActorType,
   PolicyClassification,
   PolicyContext,
+  DataQuality,
+  DataCheck,
+  DataCheckResult,
   PolicyList,
   PolicyObjectType,
   PolicyTestRequest,

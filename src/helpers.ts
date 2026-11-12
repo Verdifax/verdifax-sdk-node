@@ -7,6 +7,9 @@ import type {
   ExecuteRequest,
   JobLink,
   PolicyContext,
+  DataQuality,
+  DataCheck,
+  DataCheckResult,
   ReproducibilityContext,
 } from "./types.js";
 import { validateHex64, validateJobName } from "./validation.js";
@@ -147,7 +150,113 @@ const POLICY_CONTEXT_FIELDS: Record<keyof PolicyContext, true> = {
   object_type: true,
   object_id: true,
   classification: true,
+  data_quality: true,
 };
+
+const DATA_QUALITY_FIELDS: Record<keyof DataQuality, true> = {
+  source: true,
+  as_of: true,
+  checks: true,
+};
+const DATA_CHECK_FIELDS: Record<keyof DataCheck, true> = { name: true, result: true };
+const DATA_CHECK_RESULTS = ["pass", "fail", "warn"];
+const MAX_DATA_SOURCE_BYTES = 200;
+const MAX_DATA_CHECKS = 50;
+const MAX_DATA_CHECK_NAME_BYTES = 100;
+
+// The one form an as_of time may take, in ASCII digits, as the server
+// checks it (test/sdk-data-quality-vector.json).
+const AS_OF_SHAPE =
+  /^([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})(\.[0-9]{1,9})?(Z|[+-]([0-9]{2}):([0-9]{2}))$/;
+
+/** Whether `asOf` is a time the server accepts: the form above, a real
+ *  calendar date and time, and an offset of at most 23:59. */
+function validAsOf(asOf: string): boolean {
+  const shape = AS_OF_SHAPE.exec(asOf);
+  if (shape === null) return false;
+  const part = (index: number): number => Number(shape[index]);
+  const [year, month, day, hour, minute, second] = [part(1), part(2), part(3), part(4), part(5), part(6)];
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const monthDays = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  if (month < 1 || month > 12 || day < 1 || day > (monthDays[month - 1] ?? 0)) return false;
+  if (hour > 23 || minute > 59 || second > 59) return false;
+  if (shape[9] !== undefined && (part(9) > 23 || part(10) > 59)) return false;
+  return true;
+}
+
+// The characters Go's strings.TrimSpace removes, which the server uses to
+// find a blank check name. U+FEFF is not one of them.
+const GO_SPACE_ONLY = /^[\t\n\v\f\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]*$/;
+
+function plainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** The data_quality block, checked the way the server checks it. Returns
+ *  a copy with undefined keys left out. */
+function checkedDataQuality(value: unknown): DataQuality {
+  if (!plainObject(value)) {
+    throw new VerdifaxError("verdifax: policy_context.data_quality must be an object");
+  }
+  refuseUnknownFields(value, DATA_QUALITY_FIELDS, "policy_context.data_quality");
+  const out: DataQuality = {};
+  const { source, as_of, checks } = value;
+  if (source !== undefined) {
+    if (typeof source !== "string") {
+      throw new VerdifaxError("verdifax: policy_context.data_quality.source must be a string");
+    }
+    if (Buffer.byteLength(source, "utf8") > MAX_DATA_SOURCE_BYTES) {
+      throw new VerdifaxError(
+        `verdifax: policy_context.data_quality.source is longer than ${MAX_DATA_SOURCE_BYTES} bytes`,
+      );
+    }
+    out.source = source;
+  }
+  if (as_of !== undefined) {
+    if (typeof as_of !== "string" || (as_of !== "" && !validAsOf(as_of))) {
+      throw new VerdifaxError(
+        "verdifax: policy_context.data_quality.as_of must be a time of the form 2026-11-11T09:00:00Z or 2026-11-11T09:00:00+05:30",
+      );
+    }
+    out.as_of = as_of;
+  }
+  if (checks !== undefined) {
+    if (!Array.isArray(checks)) {
+      throw new VerdifaxError("verdifax: policy_context.data_quality.checks must be a list");
+    }
+    if (checks.length > MAX_DATA_CHECKS) {
+      throw new VerdifaxError(
+        `verdifax: policy_context.data_quality names more than ${MAX_DATA_CHECKS} checks`,
+      );
+    }
+    const seen = new Set<string>();
+    out.checks = checks.map((check: unknown) => {
+      if (!plainObject(check)) {
+        throw new VerdifaxError("verdifax: each policy_context.data_quality check must be an object");
+      }
+      refuseUnknownFields(check, DATA_CHECK_FIELDS, "policy_context.data_quality check");
+      const { name, result } = check;
+      if (
+        typeof name !== "string" ||
+        GO_SPACE_ONLY.test(name) ||
+        Buffer.byteLength(name, "utf8") > MAX_DATA_CHECK_NAME_BYTES ||
+        seen.has(name)
+      ) {
+        throw new VerdifaxError(
+          `verdifax: each policy_context.data_quality check needs a distinct name of at most ${MAX_DATA_CHECK_NAME_BYTES} bytes`,
+        );
+      }
+      seen.add(name);
+      if (typeof result !== "string" || !DATA_CHECK_RESULTS.includes(result)) {
+        throw new VerdifaxError(
+          `verdifax: policy_context.data_quality check ${JSON.stringify(name)} has a result that is not pass, fail or warn`,
+        );
+      }
+      return { name, result: result as DataCheckResult };
+    });
+  }
+  return out;
+}
 
 function refuseOutsideList(
   value: unknown,
@@ -178,6 +287,7 @@ export function checkedPolicyContext(context: PolicyContext): PolicyContext {
     object_type,
     object_id,
     classification,
+    data_quality,
   } = context;
   if (actor_type !== undefined) {
     refuseOutsideList(actor_type, POLICY_ACTOR_TYPES, "actor_type");
@@ -217,6 +327,9 @@ export function checkedPolicyContext(context: PolicyContext): PolicyContext {
   if (classification !== undefined) {
     refuseOutsideList(classification, POLICY_CLASSIFICATIONS, "classification");
     out.classification = classification;
+  }
+  if (data_quality !== undefined) {
+    out.data_quality = checkedDataQuality(data_quality);
   }
   return out;
 }

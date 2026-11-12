@@ -61,14 +61,14 @@ if (v.verified) {
 | `client.verifyDeterminism(req)` | `POST /execute/verify-determinism` | required |
 | `client.getRun(id)` | `GET /runs/{id}` | required |
 | `client.verifyRun(id)` | `GET /runs/{id}/verify` | required |
-| `client.listRuns(params)` | `GET /runs` | required |
+| `client.listRuns(params)` | `GET /runs`. A value the server cannot read throws an `APIError` (400) unless `lenient: true`; `searchRuns`, `listAccountRuns` and `listAttestations` take `lenient` too | required |
 | `client.searchRuns(params)` | `GET /runs/search` | required |
 | `client.exportRuns(params)` | `GET /runs/export` | required |
 | `client.exportRunsCSV(params)` | `GET /runs/export?format=csv` | required |
 | `client.getRunArtifacts(id)` | `GET /runs/{id}/artifacts` | required |
 | `client.getRunReport(id)` | `GET /runs/{id}/report` | required |
-| `client.downloadAuditPDF(id, format, { aiOutputText })` | `GET /runs/{id}/report.pdf`, or `POST` with the AI's answer, printed when its SHA-256 is the sealed hash | required |
-| `client.downloadPublicAuditPDF(token, format, { aiOutputText })` | `GET` or `POST /public/runs/{token}/report.pdf` | none |
+| `client.downloadAuditPDF(id, format, { aiOutputText, fallback })` | `GET /runs/{id}/report.pdf`, or `POST` with the AI's answer, printed when its SHA-256 is the sealed hash. An unknown format throws an `APIError` (400) unless `fallback: "comprehensive"` | required |
+| `client.downloadPublicAuditPDF(token, format, { aiOutputText, fallback })` | `GET` or `POST /public/runs/{token}/report.pdf` | none |
 | `client.getAllowToken(id)` | `GET /runs/{id}/allow-token` | required |
 | `client.getDenyReceipt(id)` | `GET /runs/{id}/deny-receipt` | required |
 | `client.getCCVHaltReceipt(id)` | `GET /runs/{id}/ccv-halt-receipt` | required |
@@ -81,6 +81,8 @@ if (v.verified) {
 | `client.getAttestation(id)` | `GET /attestations/{id}` | required |
 | `client.getPublicBundle(id)` | `GET /runs/{id}/bundle.json` | none |
 | `client.getPublicBundleByToken(token)` | `GET /public/runs/{token}/bundle.json` | none |
+| `client.getPublicSignOff(id)` | `GET /runs/{id}/signoff.json`: the sign-off a published run's audit report prints, and its job's decision in force | none |
+| `client.getPublicSignOffByToken(token)` | `GET /public/runs/{token}/signoff.json` | none |
 | `client.dcaeVerify(bundle)` | `POST /dcae/verify` | none |
 | `client.registerRequestKey()` | `POST /keys/request-key` | required |
 | `client.rotateRequestKey(newSigningKey)` | `POST /keys/request-key` | required |
@@ -258,7 +260,9 @@ writeFileSync("policy-history.json", (await client.getPolicyHistory()).sealedJso
 
 `activatePolicy` reads `listPolicies` first and names the newest change as the one it follows. With the `signingKey` option it sends the request key's signature over the chain, the document and that change, which the server requires while a request key is registered. Rolling back is activating an earlier document: it is one more change, so the change it undoes stays on the record. An HTTP 409 means another change came first or the document is not yet effective. It throws the usual `APIError` and is not retried. `getPolicyHistory` returns the changes oldest first, in the form `verdifax-verify --policy-history FILE` reads.
 
-`execute`, `attest`, each row of `executeBatch`, `verifyDeterminism`, `job.step` and the provider helpers take `policy_context` and `expected_policy_hash`. `policy_context` holds only `actor_type` (`agent`, `user`, `service` or `system`), `mfa_satisfied` (true or false), `session_age_seconds` (a whole number, not negative), `object_type` (`text`, `transaction`, `code`, `data`, `model` or `file`), `object_id` (at most 256 bytes) and `classification` (`PUBLIC`, `INTERNAL`, `CONFIDENTIAL`, `RESTRICTED`, `TOP_SECRET` or `TS_SCI`). Any other key or value is refused before sending, because a misspelt key would be dropped and a rule on it would read its zero value. `actor_type`, `mfa_satisfied` and `session_age_seconds` describe the attested actor, so a run that sets one of them must also send `attested_context` with the actor, such as its `actor_id`. `expected_policy_hash` is 64 lowercase hex characters: when another policy is active the server refuses the run with HTTP 409. Both fields are inside `signed_request` on a signed client.
+`execute`, `attest`, each row of `executeBatch`, `verifyDeterminism`, `job.step` and the provider helpers take `policy_context` and `expected_policy_hash`. `policy_context` holds only `actor_type` (`agent`, `user`, `service` or `system`), `mfa_satisfied` (true or false), `session_age_seconds` (a whole number, not negative), `object_type` (`text`, `transaction`, `code`, `data`, `model` or `file`), `object_id` (at most 256 bytes), `classification` (`PUBLIC`, `INTERNAL`, `CONFIDENTIAL`, `RESTRICTED`, `TOP_SECRET` or `TS_SCI`) and `data_quality` (below). Any other key or value is refused before sending, because a misspelt key would be dropped and a rule on it would read its zero value. `actor_type`, `mfa_satisfied` and `session_age_seconds` describe the attested actor, so a run that sets one of them must also send `attested_context` with the actor, such as its `actor_id`. `expected_policy_hash` is 64 lowercase hex characters: when another policy is active the server refuses the run with HTTP 409. Both fields are inside `signed_request` on a signed client.
+
+`policy_context.data_quality` is your declaration about the data the decision used: `source` (at most 200 bytes), `as_of` (a time such as `2026-11-11T09:00:00Z` or `2026-11-11T09:00:00+05:30`) and `checks`, up to 50, each a distinct `name` of at most 100 bytes and a `result` of `pass`, `fail` or `warn`. It needs no attested actor. It is sealed with the other values, a policy's `data_quality` condition can require and test it, and Verdifax judges none of it. A declaration the server would refuse is refused before sending.
 
 Verdifax did not write, review or approve your policy. A pass means the rules ran, not that they are good rules.
 
@@ -390,6 +394,8 @@ writeFileSync("signals.json", (await feed.getSignals({ limit: 500 })).sealedJson
 ```
 
 `followSignals` reads page after page and starts each read at the previous page's `next_after`, so it never skips an event, and it refuses a page that would skip or go back. When there is no new event, each read waits up to `wait` seconds (default 25) on the server. A failed read is retried like any GET. If it still fails, `followSignals` throws `SignalFeedError`, whose `lastSequence` is the last sequence it handed out and whose `cause` is the error the read threw. It runs until you stop it with `break` or `return`. `getSignals` reads one page: `after` is the last sequence read (default 0), `limit` is 1 to 500 and `wait` is 0 to 25 seconds. The timeout of a signals call is at least its wait plus 30 seconds, whatever the client's `timeoutMs`. Bad options are refused before anything is sent.
+
+`pendingSignOffs(events)` returns, in feed order, the run ids whose allowing policy rule requires a person's sign-off (their `run.sealed` event says `signoff_required`) and on which no approval is in force: the last sign-off on the record, if any, is not an approval. Pass the feed from its start, or pages that include each run's sign-offs. It makes no request.
 
 The owner key subscribes an https address with `createWebhook(url, { types })`, at most ten per account. `types` are the kinds to deliver, each once; empty or left out takes every kind. The secret, `whsec_` and base64, is in the result this once. Each delivery is signed under the Standard Webhooks scheme. Check it with `verifyWebhook` before you use it, passing the body exactly as received:
 

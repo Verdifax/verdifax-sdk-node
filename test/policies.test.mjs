@@ -36,7 +36,20 @@ const CONTEXT = {
   object_type: "transaction",
   object_id: "loan-1042",
   classification: "CONFIDENTIAL",
+  data_quality: {
+    source: "core-banking",
+    as_of: "2026-11-11T09:00:00Z",
+    checks: [
+      { name: "complete", result: "pass" },
+      { name: "drift", result: "warn" },
+    ],
+  },
 };
+// The data_quality values every SDK and the server treat the same way,
+// copied unchanged from scripts/sdk-data-quality-vector.json.
+const DATA_QUALITY_VECTOR = JSON.parse(
+  readFileSync(new URL("./sdk-data-quality-vector.json", import.meta.url), "utf8"),
+);
 const POLICY = {
   policy_id: "acme-loans",
   policy_version: "3",
@@ -434,6 +447,28 @@ const BAD_FIELDS = [
     { attested_context: { actor_id: "" }, policy_context: { actor_type: "user" } },
     /attested actor/,
   ],
+  ["a data_quality that is not an object", { policy_context: { data_quality: "fresh" } }, /data_quality must be an object/],
+  ["an unknown data_quality key", { policy_context: { data_quality: { asOf: "2026-11-11T09:00:00Z" } } }, /unknown field: asOf/],
+  ["a data_quality source over 200 bytes", { policy_context: { data_quality: { source: "s".repeat(201) } } }, /source/],
+  ["a 101-character source of 202 bytes", { policy_context: { data_quality: { source: "é".repeat(101) } } }, /source/],
+  ["a numeric source", { policy_context: { data_quality: { source: 7 } } }, /source/],
+  ["a date-only as_of", { policy_context: { data_quality: { as_of: "2026-11-11" } } }, /as_of/],
+  ["a numeric as_of", { policy_context: { data_quality: { as_of: 1762851600 } } }, /as_of/],
+  ["checks that are not a list", { policy_context: { data_quality: { checks: { name: "x" } } } }, /checks must be a list/],
+  [
+    "51 checks",
+    { policy_context: { data_quality: { checks: Array.from({ length: 51 }, (_, i) => ({ name: `c${i}`, result: "pass" })) } } },
+    /more than 50 checks/,
+  ],
+  ["a check that is not an object", { policy_context: { data_quality: { checks: ["complete"] } } }, /check must be an object/],
+  ["an unknown check key", { policy_context: { data_quality: { checks: [{ name: "x", result: "pass", why: "y" }] } } }, /unknown field: why/],
+  ["a blank check name", { policy_context: { data_quality: { checks: [{ name: " ", result: "pass" }] } } }, /distinct name/],
+  [
+    "a repeated check name",
+    { policy_context: { data_quality: { checks: [{ name: "x", result: "pass" }, { name: "x", result: "fail" }] } } },
+    /distinct name/,
+  ],
+  ["a check result outside pass, fail and warn", { policy_context: { data_quality: { checks: [{ name: "x", result: "ok" }] } } }, /not pass, fail or warn/],
   ["a short expected_policy_hash", { expected_policy_hash: "d".repeat(63) }, /expected_policy_hash/],
   ["an uppercase expected_policy_hash", { expected_policy_hash: "D".repeat(64) }, /expected_policy_hash/],
   ["an empty expected_policy_hash", { expected_policy_hash: "" }, /expected_policy_hash/],
@@ -597,4 +632,24 @@ test("a provider helper still accepts a spread run request", async () => {
     assert.deepEqual(body.policy_context, { object_type: "text" });
     assert.equal(body.expected_policy_hash, POLICY_HASH);
   }
+});
+
+test("as_of times and check names are accepted and refused exactly as the shared vector lists", async () => {
+  const contexts = [];
+  for (const as_of of DATA_QUALITY_VECTOR.as_of.accept) contexts.push({ data_quality: { as_of } });
+  for (const name of DATA_QUALITY_VECTOR.check_name.accept) {
+    contexts.push({ data_quality: { checks: [{ name, result: "pass" }] } });
+  }
+  const refused = [
+    ...DATA_QUALITY_VECTOR.as_of.refuse.map((as_of) => ({ data_quality: { as_of } })),
+    ...DATA_QUALITY_VECTOR.check_name.refuse.map((name) => ({ data_quality: { checks: [{ name, result: "pass" }] } })),
+  ];
+  assert.ok(contexts.length > 0 && refused.length > 0);
+  const { seen } = await withServer(sealedRun, async (c) => {
+    for (const policy_context of contexts) await c.execute({ ...ROW, policy_context });
+    for (const policy_context of refused) {
+      await assert.rejects(c.execute({ ...ROW, policy_context }), VerdifaxError, JSON.stringify(policy_context));
+    }
+  });
+  assert.deepEqual(seen.map((r) => r.body.policy_context), contexts);
 });
