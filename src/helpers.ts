@@ -356,9 +356,11 @@ function refuseActorFactsWithoutActor(
 }
 
 // Every top-level key of a run request, the same list as execute_fields in
-// scripts/sdk-parity.json, which a test holds it to. The server ignores a
-// key it does not know, so a misspelt one would be dropped with no error.
-// A Record, so the compiler fails here if ExecuteRequest gains a field.
+// scripts/sdk-parity.json, which a test holds it to, and the fields of the
+// server's executeRequest. The server refuses a key it does not know with
+// HTTP 400, and with lenient=1 drops it; the client refuses it first, so a
+// misspelt one is never sent. A Record, so the compiler fails here if
+// ExecuteRequest gains a field.
 const EXECUTE_FIELD_SET: Record<keyof ExecuteRequest | "signed_request", true> = {
   payload: true,
   payload_text: true,

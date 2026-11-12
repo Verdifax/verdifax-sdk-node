@@ -223,6 +223,19 @@ export interface PolicyActivationSignature {
   nonce: string;
 }
 
+/** The owner's signature over a change the owner decides, as a request
+ *  sends it: the owner key's request key signs
+ *  {@link ownerChangePreimage}. */
+export interface OwnerChangeSignature {
+  /** Base64 Ed25519 signature by the owner key's request key. */
+  signature: string;
+  /** RFC 3339 UTC with whole seconds, within five minutes of the server's
+   *  clock. */
+  signed_at: string;
+  /** 16 random bytes as 32 lowercase hex characters, fresh per change. */
+  nonce: string;
+}
+
 /** One policy change, as {@link VerdifaxClient.activatePolicy} and
  *  {@link VerdifaxClient.getPolicyHistory} return it. */
 export interface PolicyActivation {
@@ -896,6 +909,126 @@ export interface Account {
   /** The second zone the account's reports show beside UTC: an IANA zone,
    *  `"none"` for UTC alone, or empty for the zone of the server's region. */
   time_zone?: string;
+  /** The owner's block on Verdifax replacing the owner key: while
+   *  `blocked`, Verdifax cannot replace, revoke or start a replacement of
+   *  it. Set with {@link VerdifaxClient.setAccountSetting}. */
+  owner_replacement?: AccountSettingValue;
+  /** The owner's block on Verdifax deleting one of the account's records:
+   *  while `blocked`, Verdifax cannot delete one. Set with
+   *  {@link VerdifaxClient.setAccountSetting}. */
+  verdifax_deletion?: AccountSettingValue;
+}
+
+/** One of the owner's blocks on Verdifax, as its route names it. */
+export type AccountSetting = "owner-replacement" | "verdifax-deletion";
+
+/** A setting's value. */
+export type AccountSettingValue = "allowed" | "blocked";
+
+/** The owner's signature as an account change or run deletion seals it:
+ *  the signature sent, with the request key it verifies under. */
+export interface OwnerSignature {
+  /** The owner key's base64 request public key. */
+  public_key: string;
+  signature: string;
+  signed_at: string;
+  nonce: string;
+}
+
+/** One change to an account's settings or to one of its keys' terms,
+ *  verdifax.account-change.v1, by the owner or by Verdifax: the entry of an
+ *  `account.changed` feed event, sealed with its place in the account's
+ *  signal feed and anchored on the public log. Save it as the server sent
+ *  it. */
+export interface AccountChange {
+  format: string;
+  /** `account.created`, `request_key.cleared`, `key.tier_set`,
+   *  `key.submitter_class_set`, `key.billing_set`,
+   *  `owner_key.replacement_requested`, `setting.owner_replacement` or
+   *  `setting.verdifax_deletion`. */
+  action: string;
+  /** Who decided: the account's `owner`, or `verdifax_admin`. */
+  decided_by: "owner" | "verdifax_admin";
+  /** The key a key action changes, and 0 otherwise. */
+  key_id: number;
+  /** The new value: a tier, a submitter class, linked or unlinked, allowed
+   *  or blocked, a claim expiry, or empty. */
+  value: string;
+  changed_at: string;
+  /** On a change the owner decided, the owner's request-key signature over
+   *  the account, the action and the value. */
+  owner_signature?: OwnerSignature;
+  /** The change's place in the account's signal feed. */
+  signal: { signal_account: string; signal_sequence: number; signal_previous_hash: Hex64 };
+  account_change_hash: Hex64;
+  /** The public-log anchor; absent while the entry is still being anchored. */
+  anchor?: unknown;
+}
+
+/** One of the account's records deleted, by its owner or by Verdifax,
+ *  verdifax.run-deletion.v1: the tombstone in a `run.deleted` feed event,
+ *  sealed with its place in the account's signal feed and anchored on the
+ *  public log. It binds the record's hash, so it names the exact record
+ *  that was deleted. Save it as the server sent it. */
+export interface RunDeletion {
+  format: string;
+  decided_by: "owner" | "verdifax_admin";
+  run_id: number;
+  /** A completed run's record hash, or a stopped run's receipt hash. */
+  record_hash: Hex64;
+  /** The record's job and step, when it had one. */
+  job_id?: string;
+  step_id?: string;
+  changed_at: string;
+  /** On a deletion the owner decided, the owner's request-key signature
+   *  over the account, the run and its record hash. */
+  owner_signature?: OwnerSignature;
+  signal: { signal_account: string; signal_sequence: number; signal_previous_hash: Hex64 };
+  deletion_hash: Hex64;
+  anchor?: unknown;
+}
+
+/** Returned by {@link VerdifaxClient.setAccountSetting}. */
+export interface AccountSettingResult {
+  ok: boolean;
+  setting: AccountSetting;
+  value: AccountSettingValue;
+  /** The change sealed, or null when the value was already set and nothing
+   *  changed. */
+  account_change: AccountChange | null;
+}
+
+/** Returned by {@link VerdifaxClient.deleteRun} and
+ *  {@link VerdifaxClient.adminDeleteRun}. */
+export interface RunDeletionResult {
+  ok: boolean;
+  run_id: number;
+  deleted: boolean;
+  run_deletion: RunDeletion;
+}
+
+/** Returned by {@link VerdifaxClient.adminReplaceOwnerKey}. It never holds
+ *  the link or a key: the link goes by email to the address on file, and
+ *  the new key is made when the owner opens it. */
+export interface OwnerKeyReplacement {
+  ok: boolean;
+  /** The account, `account-N`. */
+  account_id: string;
+  /** When the link stops working, RFC 3339 UTC. */
+  claim_expires: string;
+  /** The request, sealed in the account's feed as Verdifax's decision. */
+  account_change: AccountChange;
+  /** Whether the email was sent: `stage` is `sent`, `not_configured` or
+   *  `send_failed`. */
+  email: { ok: boolean; stage: string; error?: string };
+}
+
+/** Options of {@link VerdifaxClient.setAccountSetting} and
+ *  {@link VerdifaxClient.deleteRun}. */
+export interface OwnerChangeOptions {
+  /** The account's label, `account-N`, that the signature names. Left out,
+   *  it is read from GET /account. */
+  accountId?: string;
 }
 
 /** Returned by {@link VerdifaxClient.setAccountTimeZone}. */
@@ -1251,6 +1384,10 @@ export type SignalKind =
   | "run.failed"
   | "policy.changed"
   | "signoff.recorded"
+  /** An approver key registered or revoked, and below, a key created or
+   *  revoked. Each entry is a key change, `verdifax.key-change.v1`, or
+   *  `verdifax.key-change.v2`, which also seals who decided in
+   *  `decided_by`: `owner` or `verdifax_admin`. */
   | "approver.registered"
   | "approver.revoked"
   | "key.created"
@@ -1265,7 +1402,13 @@ export type SignalKind =
   /** A sign-off or policy change the public log never confirmed: its place
    *  in its chain is closed by a sealed, anchored record naming the entry it
    *  would have made. */
-  | "chain.interrupted";
+  | "chain.interrupted"
+  /** A change to the account's settings or to one of its keys' terms, by
+   *  the owner or by Verdifax: its entry is an {@link AccountChange}. */
+  | "account.changed"
+  /** One of the account's records deleted, by the owner or by Verdifax: its
+   *  entry is the {@link RunDeletion} tombstone. */
+  | "run.deleted";
 
 /** The Verdifax event inside a {@link SignalEvent}, verdifax.signal.v1. */
 export interface SignalEventData {

@@ -782,3 +782,25 @@ test("pendingSignOffs reads a job sign-off as the verifier does", async () => {
   // approval. 22: the job's approval governs its own rejection.
   assert.deepEqual(pendingSignOffs(events), [21]);
 });
+
+// Round 60: a deleted record can take no sign-off, so a run whose deletion is
+// in the events given is not pending, wherever its run.deleted event stands.
+test("pendingSignOffs leaves out a run whose run.deleted event is in the feed", async () => {
+  const { pendingSignOffs } = await import("../dist/index.js");
+  const ev = (seq, kind, entry) => ({ id: `account-7/${seq}`, data: { kind, sequence: seq, entry } });
+  const deletion = (run, decided_by = "owner") => ({ format: "verdifax.run-deletion.v1", decided_by, run_id: run, record_hash: "ab".repeat(32) });
+  const events = [
+    ev(1, "run.sealed", { run_id: 30, signoff_required: true }),
+    ev(2, "run.sealed", { run_id: 31, signoff_required: true }),
+    ev(3, "run.deleted", deletion(30)),
+  ];
+  // 30 needed a sign-off and was then deleted; 31 stays pending.
+  assert.deepEqual(pendingSignOffs(events), [31]);
+  // A deletion earlier in the list, or by Verdifax, removes the run the same way.
+  assert.deepEqual(pendingSignOffs([ev(1, "run.deleted", deletion(31, "verdifax_admin")), ...events.slice(0, 2)]), [30]);
+  // A deletion of another run leaves both pending, and a deletion alone lists nothing.
+  assert.deepEqual(pendingSignOffs([...events.slice(0, 2), ev(3, "run.deleted", deletion(99))]), [30, 31]);
+  assert.deepEqual(pendingSignOffs([ev(1, "run.deleted", deletion(30))]), []);
+  // A run.deleted entry that names no run is refused, as a run.sealed one is.
+  assert.throws(() => pendingSignOffs([ev(1, "run.deleted", { run_id: "30" })]), /run\.deleted entry of event account-7\/1 names no run/);
+});

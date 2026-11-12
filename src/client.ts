@@ -9,6 +9,7 @@ import {
   approverKeyProof,
   approverKeyProofVerifies,
   loadSigningKey,
+  ownerChangeSignature,
   policyActivationApproval,
   publicKeyOf,
   requestKeyChangeApproval,
@@ -40,6 +41,14 @@ import {
 import type {
   Account,
   AccountInfo,
+  AccountSetting,
+  AccountSettingResult,
+  AccountSettingValue,
+  OwnerChangeOptions,
+  OwnerChangeSignature,
+  OwnerKeyReplacement,
+  OwnerSignature,
+  RunDeletionResult,
   AccountKeyList,
   AccountKeyRevocation,
   AccountRunsExport,
@@ -145,6 +154,13 @@ const ACCOUNT_POLICIES_PATH = "/account/policies";
 // The chain of an account's policy changes. An account change is signed
 // over this id, so a chain of any other form is refused before signing.
 const ACCOUNT_CHAIN_ID = /^account-[1-9][0-9]*$/;
+// The owner's blocks, by route name, and the change name the owner signs.
+const ACCOUNT_SETTING_CHANGES: Record<AccountSetting, string> = {
+  "owner-replacement": "setting.owner_replacement",
+  "verdifax-deletion": "setting.verdifax_deletion",
+};
+const ACCOUNT_SETTING_VALUES = new Set(["allowed", "blocked"]);
+const RUN_DELETED_CHANGE = "run.deleted";
 const SIGNOFFS_PATH = "/signoffs";
 const ACCOUNT_SIGNOFFS_PATH = "/account/signoffs";
 const APPROVERS_PATH = "/account/approvers";
@@ -252,6 +268,8 @@ interface RawResponse {
  * | `adminClearRequestKey(id)` | DELETE /admin/keys/{id}/request-key | required |
  * | `adminCreateAccount(name, options)` | POST /admin/accounts | required |
  * | `adminListAccounts()` | GET /admin/accounts | required |
+ * | `adminReplaceOwnerKey(accountId)` | POST /admin/accounts/{id}/owner-key/replace | required |
+ * | `adminDeleteRun(runId)` | POST /admin/runs/{id}/delete | required |
  * | `attestClaudeResponse(...)` | POST /execute (helper) | required |
  * | `attestOpenAIResponse(...)` | POST /execute (helper) | required |
  * | `registerRequestKey()` | POST /keys/request-key | required |
@@ -278,6 +296,8 @@ interface RawResponse {
  * | `testAccountPolicy(req)` | POST /account/policies/test | owner key |
  * | `getAccountPolicyHistory()` | GET /account/policies/history | owner key |
  * | `activateAccountPolicy(documentHash)` | POST /account/policies/{document_hash}/activate | owner key |
+ * | `setAccountSetting(setting, value, options)` | PUT /account/settings/{setting} | owner key |
+ * | `deleteRun(runId, recordHash, options)` | POST /account/runs/{id}/delete | owner key |
  * | `registerApprover(name, approver)` | POST /account/approvers | owner key |
  * | `listApprovers()` | GET /account/approvers | owner key |
  * | `revokeApprover(id)` | DELETE /account/approvers/{id} | owner key |
@@ -888,6 +908,151 @@ export class VerdifaxClient {
       );
     }
     return this.activatePolicyAt(ACCOUNT_POLICIES_PATH, documentHash, chain);
+  }
+
+  /** Sets one of the owner's blocks on Verdifax: `owner-replacement`, which
+   *  while `blocked` stops Verdifax replacing, revoking or starting a
+   *  replacement of the owner key, or `verdifax-deletion`, which while
+   *  `blocked` stops Verdifax deleting one of the account's records.
+   *  `value` is `allowed` or `blocked`.
+   *
+   *  The owner key's request key signs the change, `setting.owner_replacement`
+   *  or `setting.verdifax_deletion`, over the account's label and the value,
+   *  and the record seals the signature, so Verdifax cannot make the change
+   *  itself. The server refuses an unsigned owner change, so this needs the
+   *  `signingKey` option and refuses to send without it. The label,
+   *  `account-N`, is read from {@link getAccount} unless `accountId` is
+   *  given. Bad input is refused before anything is sent.
+   *
+   *  Asking for the value already set changes nothing and seals nothing:
+   *  `account_change` is then null. Otherwise the change the server returns
+   *  must seal the action and value that were sent, `decided_by` owner and
+   *  the signature sent under the client's request key, or this throws
+   *  {@link VerdifaxError}. */
+  async setAccountSetting(
+    setting: AccountSetting,
+    value: AccountSettingValue,
+    options: OwnerChangeOptions = {},
+  ): Promise<AccountSettingResult> {
+    this.requireAPIKey();
+    if (!Object.hasOwn(ACCOUNT_SETTING_CHANGES, setting)) {
+      throw new VerdifaxError(
+        "verdifax: setAccountSetting setting must be owner-replacement or verdifax-deletion",
+      );
+    }
+    if (!ACCOUNT_SETTING_VALUES.has(value)) {
+      throw new VerdifaxError(
+        "verdifax: setAccountSetting value must be allowed or blocked",
+      );
+    }
+    const action = ACCOUNT_SETTING_CHANGES[setting];
+    const signed = await this.ownerSigned("setAccountSetting", action, value, options);
+    const out = await this.request<AccountSettingResult>(
+      "PUT",
+      `${ACCOUNT_PATH}/settings/${setting}`,
+      { value, owner_signature: signed.owner_signature },
+    );
+    const change = out?.account_change;
+    if (
+      change !== null &&
+      (typeof change !== "object" ||
+        change.action !== action ||
+        change.value !== value ||
+        change.decided_by !== "owner" ||
+        !ownerSignatureMatchesSent(change.owner_signature, signed))
+    ) {
+      throw new VerdifaxError(
+        "verdifax: the account change the server returned does not seal the action, value, decided_by owner and owner_signature that were sent",
+      );
+    }
+    return out;
+  }
+
+  /** Deletes one of the account's records, with the owner key. Its
+   *  tombstone, which names the exact record, stays in the account's
+   *  signal feed as a `run.deleted` event. `recordHash` is the record's
+   *  hash: a completed run's `record_hash`, or a stopped run's receipt
+   *  hash. The server refuses a hash that is not this run's with an HTTP
+   *  409, and a public record the same way: withdraw it first with
+   *  {@link unpublishRun}.
+   *
+   *  The owner key's request key signs `run.deleted` over the account's
+   *  label and `RUN_ID:RECORD_HASH`. The server refuses an unsigned owner
+   *  change, so this needs the `signingKey` option and refuses to send
+   *  without it. The label, `account-N`, is read from {@link getAccount}
+   *  unless `accountId` is given. Bad input is refused before anything is
+   *  sent. The owner's own deletions are never blocked. The tombstone the
+   *  server returns must seal the run, the record hash, `decided_by` owner
+   *  and the signature sent under the client's request key, or this throws
+   *  {@link VerdifaxError}. */
+  async deleteRun(
+    runId: number,
+    recordHash: Hex64,
+    options: OwnerChangeOptions = {},
+  ): Promise<RunDeletionResult> {
+    this.requireAPIKey();
+    requirePositiveId(runId, "runId");
+    validateHex64(recordHash, "recordHash");
+    const signed = await this.ownerSigned(
+      "deleteRun",
+      RUN_DELETED_CHANGE,
+      `${runId}:${recordHash}`,
+      options,
+    );
+    const out = await this.request<RunDeletionResult>(
+      "POST",
+      `${ACCOUNT_PATH}/runs/${runId}/delete`,
+      { record_hash: recordHash, owner_signature: signed.owner_signature },
+    );
+    const deletion = out?.run_deletion;
+    if (
+      typeof deletion !== "object" ||
+      deletion === null ||
+      deletion.run_id !== runId ||
+      deletion.record_hash !== recordHash ||
+      deletion.decided_by !== "owner" ||
+      !ownerSignatureMatchesSent(deletion.owner_signature, signed)
+    ) {
+      throw new VerdifaxError(
+        "verdifax: the run deletion the server returned does not seal the run_id, record_hash, decided_by owner and owner_signature that were sent",
+      );
+    }
+    return out;
+  }
+
+  /** The owner key's request-key signature over one change, naming the
+   *  account's label: `options.accountId`, or `account_id` from GET
+   *  /account, with the public key it verifies under. Refuses before any
+   *  request without a signing key or with a label that is not
+   *  `account-N`. */
+  private async ownerSigned(
+    method: string,
+    change: string,
+    subject: string,
+    options: OwnerChangeOptions,
+  ): Promise<SentOwnerSignature> {
+    if (!this.signingKey) {
+      throw new VerdifaxError(
+        `verdifax: ${method} needs the owner key's request key in the signingKey client option, because the server refuses an unsigned owner change`,
+      );
+    }
+    const signingKey = this.signingKey;
+    const given = options?.accountId;
+    if (given !== undefined && (typeof given !== "string" || !ACCOUNT_CHAIN_ID.test(given))) {
+      throw new VerdifaxError(
+        `verdifax: ${method} accountId must be the account's label, account-N`,
+      );
+    }
+    const account = given ?? (await this.getAccount())?.account_id;
+    if (typeof account !== "string" || !ACCOUNT_CHAIN_ID.test(account)) {
+      throw new VerdifaxError(
+        "verdifax: the server did not report an account_id (account-N), so the change cannot be signed",
+      );
+    }
+    return {
+      owner_signature: ownerChangeSignature(signingKey, { account, change, subject }),
+      public_key: publicKeyOf(signingKey),
+    };
   }
 
   // ── Sign-off ─────────────────────────────────────────────────
@@ -1712,6 +1877,37 @@ export class VerdifaxClient {
     return out?.accounts ?? parseSealed("[]");
   }
 
+  /** Starts the replacement of a lost owner key, on the owner's written
+   *  request. `accountId` is the account's number, as
+   *  {@link adminListAccounts} lists it in `id`. The request is sealed in the
+   *  account's feed as Verdifax's decision, and a one-time link, good for
+   *  72 hours, is emailed to the address of the access request that made
+   *  the account. The result never holds the link or a key: the new key is
+   *  made when the owner opens the link, so Verdifax never sees it. The
+   *  server refuses it with an HTTP 409 while the owner blocks owner-key
+   *  replacement, or when no address is on file. */
+  async adminReplaceOwnerKey(accountId: number): Promise<OwnerKeyReplacement> {
+    this.requireAPIKey();
+    requirePositiveId(accountId, "accountId");
+    return this.request<OwnerKeyReplacement>(
+      "POST",
+      `/admin/accounts/${accountId}/owner-key/replace`,
+    );
+  }
+
+  /** Deletes one record as Verdifax's decision, sealed as a tombstone in
+   *  the feed of the record's account. The server refuses it with an HTTP
+   *  409 while the account's owner blocks Verdifax deletion, and for a
+   *  public record until it is withdrawn. */
+  async adminDeleteRun(runId: number): Promise<RunDeletionResult> {
+    this.requireAPIKey();
+    requirePositiveId(runId, "runId");
+    return this.request<RunDeletionResult>(
+      "POST",
+      `/admin/runs/${runId}/delete`,
+    );
+  }
+
   async adminListKeys(): Promise<AdminAPIKey[]> {
     this.requireAPIKey();
     const out = await this.request<{ ok: boolean; keys: AdminAPIKey[] }>(
@@ -1968,6 +2164,28 @@ export class VerdifaxClient {
       ? signRequestV2(this.signingKey, req)
       : withExecuteFlags(req);
   }
+}
+
+/** An owner signature as sent, with the public key of the key that made it. */
+interface SentOwnerSignature {
+  owner_signature: OwnerChangeSignature;
+  public_key: string;
+}
+
+/** True when a sealed owner signature is the one that was sent, under the
+ *  client's own request key. */
+function ownerSignatureMatchesSent(
+  sealed: OwnerSignature | undefined,
+  sent: SentOwnerSignature,
+): boolean {
+  return (
+    typeof sealed === "object" &&
+    sealed !== null &&
+    sealed.public_key === sent.public_key &&
+    sealed.signature === sent.owner_signature.signature &&
+    sealed.signed_at === sent.owner_signature.signed_at &&
+    sealed.nonce === sent.owner_signature.nonce
+  );
 }
 
 /** The sign-off routes' base: the owner key's with `asOwner`, otherwise a

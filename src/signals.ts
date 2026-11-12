@@ -69,6 +69,8 @@ const SIGNAL_KINDS: readonly SignalKind[] = Object.freeze([
   "chain.gap",
   "run.sealed",
   "chain.interrupted",
+  "account.changed",
+  "run.deleted",
 ]);
 
 /** A read of the feed: the path with its query and the timeout to use. */
@@ -494,13 +496,17 @@ function singleHeader(headers: WebhookHeaders, name: string): string {
  * there is one, and otherwise the last record sign-off; a receipt sign-off
  * does not name a record (round 59, N15 and N19). Pass the account's feed
  * from its start, or a page that includes each run's sign-offs, so a
- * sign-off recorded later is seen (round 58, B7). Returned in feed order.
+ * sign-off recorded later is seen (round 58, B7). A run whose deletion is
+ * among `events`, a `run.deleted` event naming its run, is left out
+ * wherever that event stands in the list: its record is gone, so no
+ * sign-off can be given on it. Returned in feed order.
  */
 export function pendingSignOffs(events: readonly SignalEvent[]): number[] {
   const order: number[] = [];
   const required = new Set<number>();
   const latestJob = new Map<number, unknown>();
   const latestRecord = new Map<number, unknown>();
+  const deleted = new Set<number>();
   for (const e of events) {
     const entry = (e.data?.entry ?? {}) as Record<string, unknown>;
     if (e.data?.kind === "run.sealed") {
@@ -512,6 +518,12 @@ export function pendingSignOffs(events: readonly SignalEvent[]): number[] {
         required.add(run);
         order.push(run);
       }
+    } else if (e.data?.kind === "run.deleted") {
+      const run = entry.run_id;
+      if (typeof run !== "number") {
+        throw new VerdifaxError(`verdifax: the run.deleted entry of event ${e.id} names no run`);
+      }
+      deleted.add(run);
     } else if (e.data?.kind === "signoff.recorded") {
       const target = (entry.target ?? {}) as Record<string, unknown>;
       if (typeof target.run_id === "number") {
@@ -524,6 +536,6 @@ export function pendingSignOffs(events: readonly SignalEvent[]): number[] {
     }
   }
   const inForce = (run: number) => (latestJob.has(run) ? latestJob.get(run) : latestRecord.get(run));
-  return order.filter((run) => inForce(run) !== "approve");
+  return order.filter((run) => !deleted.has(run) && inForce(run) !== "approve");
 }
 

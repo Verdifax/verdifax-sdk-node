@@ -24,6 +24,7 @@ import type {
   ApproverKeyProof,
   ExecuteRequest,
   JobLink,
+  OwnerChangeSignature,
   PolicyActivationSignature,
   RequestKeyChange,
   RequestKeyPair,
@@ -44,6 +45,7 @@ const REQUEST_KEY_CHANGE_FORM = "verdifax.request-key-change.v1";
 const POLICY_ACTIVATION_FORM = "verdifax.policy-activation.v1";
 const SIGNOFF_FORM = "verdifax.signoff.v1";
 const APPROVER_KEY_PROOF_FORM = "verdifax.approver-key.v1";
+const OWNER_CHANGE_FORM = "verdifax.owner-change-signature.v1";
 const SIGNING_KEY_BYTES = 32;
 
 // DER header of an SPKI Ed25519 public key. The 32 raw key bytes follow.
@@ -337,6 +339,54 @@ export function policyActivationApproval(
     signed_at,
     nonce,
   });
+  return {
+    signature: sign(null, preimage, key).toString("base64"),
+    signed_at,
+    nonce,
+  };
+}
+
+/** The bytes the owner key's request key signs for a change the owner
+ *  decides, matching the orchestrator's OwnerChangePreimage: the fields
+ *  joined with single zero bytes. `account` is the account's label,
+ *  `account-N`. `change` is `setting.owner_replacement`,
+ *  `setting.verdifax_deletion` or `run.deleted`. `subject` is the setting's
+ *  new value (`allowed` or `blocked`), or `RUN_ID:RECORD_HASH` for a
+ *  deletion. The record seals the signature, so Verdifax, which never holds
+ *  the key, cannot make the change. */
+export function ownerChangePreimage(fields: {
+  account: string;
+  change: string;
+  subject: string;
+  signed_at: string;
+  nonce: string;
+}): Buffer {
+  return Buffer.from(
+    [
+      OWNER_CHANGE_FORM,
+      fields.account,
+      fields.change,
+      fields.subject,
+      fields.signed_at,
+      fields.nonce,
+    ].join("\0"),
+    "utf8",
+  );
+}
+
+/** The owner's signature over one change, the `owner_signature` value of
+ *  PUT /account/settings/{setting} and POST /account/runs/{id}/delete.
+ *  `signedAt` and `nonce` default to the current time and fresh random
+ *  bytes. A nonce the server has already seen is refused. */
+export function ownerChangeSignature(
+  signingKey: Uint8Array | KeyObject,
+  fields: { account: string; change: string; subject: string },
+  options: { signedAt?: string; nonce?: string } = {},
+): OwnerChangeSignature {
+  const key = loadSigningKey(signingKey);
+  const signed_at = options.signedAt ?? signedAtNow();
+  const nonce = options.nonce ?? randomBytes(16).toString("hex");
+  const preimage = ownerChangePreimage({ ...fields, signed_at, nonce });
   return {
     signature: sign(null, preimage, key).toString("base64"),
     signed_at,
