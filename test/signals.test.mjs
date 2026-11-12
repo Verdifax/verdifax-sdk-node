@@ -761,3 +761,24 @@ test("pendingSignOffs lists required runs without an approval in force", async (
   assert.deepEqual(pendingSignOffs(events), [12, 13]);
   assert.throws(() => pendingSignOffs([ev(1, "run.sealed", {})]));
 });
+
+// Round 59, N15 and N19: a job sign-off on a run's record counts, and the
+// job's decision governs the record's own, as the verifier reads it.
+test("pendingSignOffs reads a job sign-off as the verifier does", async () => {
+  const { pendingSignOffs } = await import("../dist/index.js");
+  const ev = (seq, kind, entry) => ({ id: `account-7/${seq}`, data: { kind, sequence: seq, entry } });
+  const signOff = (run, decision, kind) => ({ decision, target: { kind, run_id: run } });
+  const events = [
+    ev(1, "run.sealed", { run_id: 20, signoff_required: true }),
+    ev(2, "run.sealed", { run_id: 21, signoff_required: true }),
+    ev(3, "run.sealed", { run_id: 22, signoff_required: true }),
+    ev(4, "signoff.recorded", signOff(20, "approve", "job")),
+    ev(5, "signoff.recorded", signOff(21, "reject", "job")),
+    ev(6, "signoff.recorded", signOff(21, "approve", "record")),
+    ev(7, "signoff.recorded", signOff(22, "reject", "record")),
+    ev(8, "signoff.recorded", signOff(22, "approve", "job")),
+  ];
+  // 20: approved by its job. 21: the job's rejection governs its own
+  // approval. 22: the job's approval governs its own rejection.
+  assert.deepEqual(pendingSignOffs(events), [21]);
+});

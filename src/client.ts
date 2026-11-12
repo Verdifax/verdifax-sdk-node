@@ -107,6 +107,7 @@ import type {
   AccountTimeZone,
   RestoreGapRecord,
   ChainInterruptedRecord,
+  SignOffHeadRecord,
   PublicationResult,
   SignOffTarget,
   VerdifaxVersion,
@@ -1113,11 +1114,15 @@ export class VerdifaxClient {
 
   /** The account's whole chain of sign-offs, oldest first, in the form
    *  `verdifax-verify --signoff-history FILE` reads, with restore gaps and
-   *  interrupted records in the places they close. Needs the owner key. */
-  async getSignOffHistory(): Promise<SealedList<SignOffRecord | RestoreGapRecord | ChainInterruptedRecord>> {
+   *  interrupted records in the places they close. It ends with the
+   *  chain's head statement, anchored on the public log, whenever the chain
+   *  holds a place; if the head could not be anchored it is left out, and
+   *  `verdifax-verify` then cannot call the history complete. Needs the
+   *  owner key. */
+  async getSignOffHistory(): Promise<SealedList<SignOffRecord | RestoreGapRecord | ChainInterruptedRecord | SignOffHeadRecord>> {
     this.requireAPIKey();
     return (
-      (await this.request<SealedList<SignOffRecord | RestoreGapRecord | ChainInterruptedRecord>>(
+      (await this.request<SealedList<SignOffRecord | RestoreGapRecord | ChainInterruptedRecord | SignOffHeadRecord>>(
         "GET",
         `${ACCOUNT_SIGNOFFS_PATH}/history`,
       )) ?? parseSealed("[]")

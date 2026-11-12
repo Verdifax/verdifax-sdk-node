@@ -489,15 +489,18 @@ function singleHeader(headers: WebhookHeaders, name: string): string {
 /**
  * The runs among `events` whose allowing policy rule requires a person's
  * sign-off (their `run.sealed` entry says `signoff_required`) and on whose
- * record no approval is in force: the last sign-off recorded on the record,
- * if any, is not an approval. Pass the account's feed from its start, or a
- * page that includes each run's sign-offs, so a sign-off recorded later is
- * seen (round 58, B7). Returned in feed order.
+ * record no approval is in force. The decision in force is read as
+ * verdifax-verify reads it: the last job sign-off on the run governs when
+ * there is one, and otherwise the last record sign-off; a receipt sign-off
+ * does not name a record (round 59, N15 and N19). Pass the account's feed
+ * from its start, or a page that includes each run's sign-offs, so a
+ * sign-off recorded later is seen (round 58, B7). Returned in feed order.
  */
 export function pendingSignOffs(events: readonly SignalEvent[]): number[] {
   const order: number[] = [];
   const required = new Set<number>();
-  const latest = new Map<number, unknown>();
+  const latestJob = new Map<number, unknown>();
+  const latestRecord = new Map<number, unknown>();
   for (const e of events) {
     const entry = (e.data?.entry ?? {}) as Record<string, unknown>;
     if (e.data?.kind === "run.sealed") {
@@ -511,11 +514,16 @@ export function pendingSignOffs(events: readonly SignalEvent[]): number[] {
       }
     } else if (e.data?.kind === "signoff.recorded") {
       const target = (entry.target ?? {}) as Record<string, unknown>;
-      if (target.kind === "record" && typeof target.run_id === "number") {
-        latest.set(target.run_id, entry.decision);
+      if (typeof target.run_id === "number") {
+        if (target.kind === "job") {
+          latestJob.set(target.run_id, entry.decision);
+        } else if (target.kind === "record") {
+          latestRecord.set(target.run_id, entry.decision);
+        }
       }
     }
   }
-  return order.filter((run) => latest.get(run) !== "approve");
+  const inForce = (run: number) => (latestJob.has(run) ? latestJob.get(run) : latestRecord.get(run));
+  return order.filter((run) => inForce(run) !== "approve");
 }
 

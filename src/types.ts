@@ -765,7 +765,10 @@ export interface PublicJobSignOff {
 }
 
 /** The sign-off a published run's audit report prints. `read` is false
- *  when the run's sign-offs could not be read. The note, the approver key
+ *  when the run's sign-offs could not be read. `decision_in_force` is null
+ *  when nothing is signed off, and for a step whose job's sign-offs could not
+ *  be read (`job.read` false), since the job's decision would govern. The
+ *  note, the approver key
  *  and the signatures are not served; `verdifax-verify --signoff` checks
  *  them from the account's sign-off records. */
 export interface PublicSignOffAnswer {
@@ -778,6 +781,15 @@ export interface PublicSignOffAnswer {
     decision: string;
     run_id: number;
     on: "this_record" | "job_final_step";
+    /** The kind of sign-off in force: record, receipt or job. */
+    signed_as: "record" | "receipt" | "job";
+    /** The sign-off in force's place in the account's chain. */
+    sequence: number;
+    /** When the sign-off in force was signed. */
+    signed_at: string;
+    /** When the job's decision governs, this result's own latest
+     *  decision, shown under it; absent otherwise. */
+    own_decision?: string;
   } | null;
 }
 
@@ -1081,6 +1093,23 @@ export interface ChainInterruptedRecord {
   recorded_at: string;
   signal: { signal_account: string; signal_sequence: number; signal_previous_hash: Hex64 };
   interrupted_hash: Hex64;
+  anchor?: unknown;
+}
+
+/** The head of the account's sign-off chain, verdifax.signoff-head.v1: the
+ *  last item of {@link VerdifaxClient.getSignOffHistory}. Verdifax states the
+ *  chain's highest place, taken by a sign-off or closed by a restore gap or
+ *  an interrupted record, and the hash of its newest sign-off, and anchors the
+ *  statement on the public log. `verdifax-verify --signoff-history` then says
+ *  the history is complete as of the log's integration time, and requires it
+ *  when a rule requires a person's sign-off, since v0.31.0 (round 59, N16). */
+export interface SignOffHeadRecord {
+  format: "verdifax.signoff-head.v1";
+  chain_id: string;
+  sequence: number;
+  head_hash: Hex64;
+  stated_at: string;
+  head_statement_hash: Hex64;
   anchor?: unknown;
 }
 

@@ -140,6 +140,7 @@ export type {
   ReproducibilityContext,
   RestoreGapRecord,
   ChainInterruptedRecord,
+  SignOffHeadRecord,
   Run,
   RunSealedRecord,
   RunsExport,
