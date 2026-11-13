@@ -98,6 +98,7 @@ if (v.verified) {
 | `client.listAccountKeys()` | `GET /account/keys` | owner key |
 | `client.revokeAccountKey(id)` | `DELETE /account/keys/{id}` | owner key |
 | `client.registerAccountRequestKey()` | `POST /account/request-key` | owner key |
+| `client.rotateAccountRequestKey(newSigningKey)` | `POST /account/request-key`, approved by the current request key | owner key |
 | `client.clearAccountRequestKey()` | `DELETE /account/request-key` | owner key |
 | `client.listAccountRuns(params)` | `GET /account/runs` | owner key |
 | `client.exportAccountRuns(params)` | `GET /account/runs/export` | owner key |
@@ -316,6 +317,8 @@ The account's view covers the runs its keys made through Verdifax. It does not c
 
 `activateAccountPolicy` reads `listAccountPolicies` first, names the newest change as the one it follows and signs the change over the account's chain, `account-N`, with the same signature `activatePolicy` uses. The server refuses an unsigned account policy change, so `activateAccountPolicy` needs the `signingKey` option, set to the owner key's registered request key, and refuses before sending anything without it. It also refuses a `chain_id` that is not of the form `account-N`. The other account policy methods take and return what the matching key policy methods do. `getAccountPolicyHistory` returns the account's changes oldest first, in the form `verdifax-verify --policy-history FILE` reads.
 
+`rotateAccountRequestKey(newSigningKey)` replaces the owner key's request key as `rotateRequestKey` does for a key's own: the new key proves itself, the current key, the client's `signingKey`, approves the change, and the client signs with the new key only after the server accepts it. A refusal, including an `APIError` (409) when another change replaced the request key first, leaves the client with its current key. The rotation is sealed in the account's signal feed as a `request_key.rotated` account change carrying the approval, so the owner key's request-key chain can be followed from its registration.
+
 The owner sets two blocks on Verdifax with `setAccountSetting(setting, value)`. While `owner-replacement` is `blocked`, Verdifax cannot replace, revoke or start a replacement of the owner key. While `verdifax-deletion` is `blocked`, Verdifax cannot delete one of the account's records. `value` is `allowed` or `blocked`, and `getAccount` shows both as `owner_replacement` and `verdifax_deletion`. Each change is sealed in the account's signal feed as an `account.changed` event. Asking for the value already set changes nothing, and `account_change` is then null.
 
 `deleteRun(runId, recordHash)` deletes one of the account's records. `recordHash` is a completed run's `record_hash`, or a stopped run's receipt hash, and the server refuses a hash that is not this run's with an HTTP 409. A public record must be withdrawn first with `unpublishRun`. The record's tombstone, which names the exact record, stays in the signal feed as a `run.deleted` event.
@@ -387,7 +390,7 @@ Since v0.22.0, the verifier reads sign-offs with `--signoff` and `--signoff-hist
 
 ## Signal feed
 
-The signal feed is every control signal Verdifax recorded for the account, in order: successful runs (`run.sealed`), refused, halted and failed runs, policy changes, sign-offs, approver keys registered and revoked, keys created and revoked, records made public or withdrawn (`run.published`, `run.unpublished`), changes to the account and its keys' terms (`account.changed`), deleted records (`run.deleted`), restore gaps (`chain.gap`) and interrupted entries (`chain.interrupted`). A key change may be `verdifax.key-change.v2`, which also seals who decided in `decided_by`: `owner` or `verdifax_admin`. Each event is a CloudEvent that carries its sealed entry (or, for an event whose record was deleted, that record's tombstone in place of the entry), its place in the feed and the hash of the event before it. The feed cannot show a signal Verdifax never recorded.
+The signal feed is every control signal Verdifax recorded for the account, in order: successful runs (`run.sealed`), refused, halted and failed runs, policy changes, sign-offs, approver keys registered and revoked, keys created and revoked, records made public or withdrawn (`run.published`, `run.unpublished`), changes to the account and its keys' terms (`account.changed`), deleted records (`run.deleted`), restore gaps (`chain.gap`) and interrupted entries (`chain.interrupted`). A key change may be `verdifax.key-change.v2`, which also seals who decided in `decided_by`: `owner` or `verdifax_admin`. Each request key of a key in a customer's account is sealed as an `account.changed` event when its holder registers it (`request_key.registered`), replaces it (`request_key.rotated`) or clears it (`request_key.cleared`, decided by `owner`); a rotation and a holder's clear carry `request_key_approval`, the replaced key's signature over the change, so `verdifax-verify` can follow each key's request-key chain. Each event is a CloudEvent that carries its sealed entry (or, for an event whose entry is a record that was deleted, such as a refused run's receipt event, that record's tombstone in place of the entry), its place in the feed and the hash of the event before it. The feed cannot show a signal Verdifax never recorded.
 
 A feed key reads the feed and nothing else. The account's owner creates one with `createFeedKey` and revokes it with `revokeFeedKey`, and the owner key reads the same feed with `asOwner: true`.
 
@@ -400,23 +403,43 @@ const { secret } = await owner.createFeedKey("grc reader"); // shown this once
 
 const feed = new VerdifaxClient({ apiKey: secret });
 let after = 0; // the last sequence your system stored
+let afterEventHash: string | undefined; // the event_hash stored with it
 try {
   for await (const event of feed.followSignals({ after })) {
     console.log(event.data.sequence, event.type, event.data.reason ?? "");
     after = event.data.sequence;
+    afterEventHash = event.data.event_hash;
   }
 } catch (err) {
   if (!(err instanceof SignalFeedError)) throw err;
   after = err.lastSequence; // follow again from here and nothing is lost
+  afterEventHash = err.afterEventHash; // the event_hash of event `after`, when known
 }
 
 // Save a page and check it with verdifax-verify --signals signals.json.
 writeFileSync("signals.json", (await feed.getSignals({ limit: 500 })).sealedJson);
 ```
 
-`followSignals` reads page after page and starts each read at the previous page's `next_after`, so it never skips an event, and it refuses a page that would skip or go back. When there is no new event, each read waits up to `wait` seconds (default 25) on the server. A failed read is retried like any GET. If it still fails, `followSignals` throws `SignalFeedError`, whose `lastSequence` is the last sequence it handed out and whose `cause` is the error the read threw. It runs until you stop it with `break` or `return`. `getSignals` reads one page: `after` is the last sequence read (default 0), `limit` is 1 to 500 and `wait` is 0 to 25 seconds. The timeout of a signals call is at least its wait plus 30 seconds, whatever the client's `timeoutMs`. Bad options are refused before anything is sent.
+A page that reaches the feed's end carries the feed's head statement in `head` (`verdifax.feed-head.v1`): the feed's highest event (`sequence`) and that event's hash (`head_hash`), stated by Verdifax at `stated_at` and anchored on the public log. It is not an event. A saved page keeps it, and `verdifax-verify --signals` then says the feed is complete as of the log's time for that entry and fails a feed that ends below the head's event; without a head it says a later event may exist. `followSignals` never hands out the head as an event. The follower it returns keeps the newest head in `head`, undefined until one is kept, and passes each newer one to the `onHead` option. A head is kept only when its `sequence` is its page's `next_after` and its `head_hash` is the `event_hash` of the last event you finished, and only once you have moved past every event on that page, so it never states the feed beyond the events you handled. Before you finish an event in a follow, the last event's hash is the `afterEventHash` option: pass the `event_hash` you saved with event `after`, and a follower resuming at the feed's end keeps the head it is served; without it, no head is kept until you finish an event; a head on a page you stopped inside is not kept, and a head already kept, read again while the feed is idle, is not passed again.
 
-`pendingSignOffs(events)` returns, in feed order, the run ids whose allowing policy rule requires a person's sign-off (their `run.sealed` event says `signoff_required`) and on which no approval is in force, read as `verdifax-verify` reads it: the latest sign-off on the run's whole job governs when there is one, and otherwise the latest sign-off on its record; a receipt sign-off does not count. Pass the feed from its start, or pages that include each run's sign-offs. A run whose deletion is in the events given, a `run.deleted` event for that run wherever it stands, is left out: its record is gone. It makes no request.
+```typescript
+const follower = feed.followSignals({
+  after,
+  afterEventHash, // the event_hash you saved with event `after`, if any
+  onHead: (head) => console.log("complete through", head.sequence, "as of", head.stated_at),
+});
+for await (const event of follower) {
+  // store the event, then ask for the next
+  after = event.data.sequence;
+  afterEventHash = event.data.event_hash;
+}
+```
+
+An event whose entry is a record that was deleted, the receipt event of a refused, halted or failed run, carries `entry: null` and the record's tombstone, a `RunDeletion`, in `data.deleted`. An event that is its own sealed record, such as `run.sealed`, keeps its entry. The tombstone names the record's public-log entries in `log_entries`, so the log still accounts for every entry once the record is gone, and the tombstone of a job step deleted since this server release carries the step's own `job_links` (`previous_record_hashes`, `external_previous` and `final`), present even when empty, so the job stays checkable without the record. A tombstone written before carries none.
+
+`followSignals` reads page after page and starts each read at the previous page's `next_after`, so it never skips an event, and it refuses a page that would skip or go back. When there is no new event, each read waits up to `wait` seconds (default 25) on the server. A failed read is retried like any GET. If it still fails, `followSignals` throws `SignalFeedError`, whose `lastSequence` is the last sequence it handed out, whose `afterEventHash` is that event's `event_hash` (or the `afterEventHash` the follow was given, before you finished an event; absent when there is neither) and whose `cause` is the error the read threw. Follow again with both, `after` and `afterEventHash`. It runs until you stop it with `break` or `return`. `getSignals` reads one page: `after` is the last sequence read (default 0), `limit` is 1 to 500 and `wait` is 0 to 25 seconds. The timeout of a signals call is at least its wait plus 30 seconds, whatever the client's `timeoutMs`. Bad options are refused before anything is sent.
+
+`pendingSignOffs(events)` returns, in feed order, the run ids whose allowing policy rule requires a person's sign-off (their `run.sealed` event says `signoff_required`) and on which no approval is in force, read as `verdifax-verify` reads it: the latest sign-off on the run's whole job governs when there is one, and otherwise the latest sign-off on its record; a receipt sign-off does not count. Pass the feed from its start, or pages that include each run's sign-offs. A run whose deletion is in the events given, a `run.deleted` event for that run wherever it stands, is left out: its record is gone. A `run.sealed` or `run.deleted` entry that does not name a whole number above zero (a null entry, 0, a negative or fractional number, or a string) is refused with `VerdifaxError`; earlier releases accepted run 0, and the shared pending sign-offs vector holds all four SDKs to this. It makes no request.
 
 The owner key subscribes an https address with `createWebhook(url, { types })`, at most ten per account. `types` are the kinds to deliver, each once; empty or left out takes every kind. The secret, `whsec_` and base64, is in the result this once. Each delivery is signed under the Standard Webhooks scheme. Check it with `verifyWebhook` before you use it, passing the body exactly as received:
 
@@ -588,6 +611,8 @@ await client.clearRequestKey(); // stops requiring signatures, and this client s
 ```
 
 A signed call serializes the request once and signs that exact text, using signature version 2, so the signature covers the whole request. It sends `signed_request` and `request_signature` and nothing else, and a batch row has the same shape. The result carries the text as `signed_request`, on each row for a batch. A refused or halted run throws the usual `APIError`, with the text in `err.signedRequest`. It holds your payload, so it stays out of the error message and logging the error does not print it: read it by name.
+
+For a key in a customer's account, each registration, rotation and clear is sealed in the account's signal feed as an `account.changed` event in the same transaction as the change, and the change is not made when it cannot be sealed. When another change replaced the request key first, the server refuses the registration, rotation or clear with an `APIError` (409), "the request key changed since this change was signed": read the key again and sign with the one in force.
 
 Registering a key changes that API key for every client that uses it: the server then refuses a run without a valid signature, so every caller on the key needs the private key. An API key alone cannot replace or clear a registered key: `rotateRequestKey` and `clearRequestKey` send the current key's approval. After a successful `clearRequestKey` the client drops its signing key and sends unsigned requests, because the server refuses a signed run on an API key with no registered key. To sign again, create a client with a `signingKey` and register it. Each request carries the time and a fresh random nonce. The server refuses a repeated nonce and a time more than five minutes from its own clock.
 

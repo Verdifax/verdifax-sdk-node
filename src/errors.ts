@@ -94,18 +94,27 @@ export class APIKeyRequiredError extends VerdifaxError {
 /** Thrown by {@link VerdifaxClient.followSignals} when a read fails or a
  *  page does not follow on from the last one. `lastSequence` is the last
  *  sequence the generator handed out, so the feed is never lost: follow
- *  again with `after: lastSequence`. The error the read threw, after the
- *  client's normal retries, is `cause`. */
+ *  again with `after: lastSequence`. `afterEventHash` is the `event_hash`
+ *  of that event, the last the caller finished, or the `afterEventHash`
+ *  the follow was given before the caller finished one; it is undefined
+ *  when neither exists. Follow again with both, `afterEventHash:
+ *  err.afterEventHash`, and a follower resuming at the feed's end keeps
+ *  the head it is served. The error the read threw, after the client's
+ *  normal retries, is `cause`. */
 export class SignalFeedError extends VerdifaxError {
   override readonly name: string = "VerdifaxSignalFeedError";
+  /** The `event_hash` of event `lastSequence`, or undefined. Declared, so
+   *  the property exists only when there is a hash. */
+  declare readonly afterEventHash?: string;
   constructor(
     public readonly lastSequence: number,
     reason: string,
-    options?: { cause?: unknown },
+    options?: { cause?: unknown; afterEventHash?: string },
   ) {
     super(
       `verdifax: the signal feed stopped after sequence ${lastSequence}: ${reason}; follow again with after: ${lastSequence}`,
-      options,
+      options !== undefined && "cause" in options ? { cause: options.cause } : undefined,
     );
+    if (options?.afterEventHash) this.afterEventHash = options.afterEventHash;
   }
 }

@@ -108,6 +108,7 @@ import type {
   RunSummary,
   SearchRunsParams,
   SignalEvent,
+  SignalFollower,
   SignalPage,
   SignedRequestBody,
   SignOffDecision,
@@ -286,6 +287,7 @@ interface RawResponse {
  * | `listAccountKeys()` | GET /account/keys | owner key |
  * | `revokeAccountKey(id)` | DELETE /account/keys/{id} | owner key |
  * | `registerAccountRequestKey()` | POST /account/request-key | owner key |
+ * | `rotateAccountRequestKey(newSigningKey)` | POST /account/request-key | owner key |
  * | `clearAccountRequestKey()` | DELETE /account/request-key | owner key |
  * | `listAccountRuns(params)` | GET /account/runs | owner key |
  * | `exportAccountRuns(params)` | GET /account/runs/export | owner key |
@@ -501,7 +503,11 @@ export class VerdifaxClient {
 
   /** Registers this client's public key on its API key, with the proof
    *  that the client holds the private key. From then on the server
-   *  refuses a run on this API key without a request signature. */
+   *  refuses a run on this API key without a request signature. For a key
+   *  in a customer's account the server seals the registration in the
+   *  account's feed as a `request_key.registered` account change. An
+   *  {@link APIError} with status 409 and the server's message means
+   *  another change replaced the request key first. */
   async registerRequestKey(): Promise<RequestKeyRegistration> {
     return this.registerRequestKeyAt(REQUEST_KEY_PATH, "registerRequestKey");
   }
@@ -527,21 +533,41 @@ export class VerdifaxClient {
    *  itself and this client's current key approves the change. After
    *  success this client signs with the new key. If the call fails it
    *  keeps the current key, including after a timeout, when the server may
-   *  have made the change. */
+   *  have made the change. For a key in a customer's account the server
+   *  seals the change in the account's feed as a `request_key.rotated`
+   *  account change carrying the approval. An {@link APIError} with status
+   *  409 and the server's message means the request key changed since the
+   *  approval was signed: read the key again and sign with the one in force. */
   async rotateRequestKey(
+    newSigningKey: Uint8Array | KeyObject,
+  ): Promise<RequestKeyRegistration> {
+    return this.rotateRequestKeyAt(
+      REQUEST_KEY_PATH,
+      "rotateRequestKey",
+      newSigningKey,
+    );
+  }
+
+  /** Sends the new key, its proof and the current key's approval to
+   *  `path`, then signs with the new key. The client switches keys only
+   *  after the server's 2xx answer, so a refusal, a 409 or a timeout keeps
+   *  the current key. */
+  private async rotateRequestKeyAt(
+    path: string,
+    method: string,
     newSigningKey: Uint8Array | KeyObject,
   ): Promise<RequestKeyRegistration> {
     this.requireAPIKey();
     if (!this.signingKey) {
       throw new VerdifaxError(
-        "verdifax: rotateRequestKey needs the current key in the signingKey client option",
+        `verdifax: ${method} needs the current key in the signingKey client option`,
       );
     }
     const next = loadSigningKey(newSigningKey);
     const registration = requestKeyRegistrationBody(next);
     const out = await this.request<RequestKeyRegistration>(
       "POST",
-      REQUEST_KEY_PATH,
+      path,
       {
         ...registration,
         change: requestKeyChangeApproval(
@@ -559,7 +585,11 @@ export class VerdifaxClient {
    *  sends that key's approval, which the server requires while a key is
    *  registered. After success the client drops its signing key and sends
    *  unsigned requests, because the server refuses a signed run on an API
-   *  key with no registered key. If the call fails it keeps the key. */
+   *  key with no registered key. If the call fails it keeps the key. For a
+   *  key in a customer's account the server seals the clear in the
+   *  account's feed as a `request_key.cleared` account change decided by
+   *  `owner`, with the approval. An {@link APIError} with status 409 means
+   *  the request key changed since the approval was signed. */
   async clearRequestKey(): Promise<void> {
     await this.clearRequestKeyAt(REQUEST_KEY_PATH);
   }
@@ -812,6 +842,25 @@ export class VerdifaxClient {
     return this.registerRequestKeyAt(
       ACCOUNT_REQUEST_KEY_PATH,
       "registerAccountRequestKey",
+    );
+  }
+
+  /** Replaces the owner key's request key with `newSigningKey`, as
+   *  {@link rotateRequestKey} does for a key's own, at POST
+   *  /account/request-key: the new key proves itself and the current key,
+   *  this client's `signingKey`, approves the change. After success this
+   *  client signs with the new key; if the call fails, including with an
+   *  {@link APIError} 409 because another change replaced the request key
+   *  first, it keeps the current key. The server seals the change in the
+   *  account's feed as a `request_key.rotated` account change carrying the
+   *  approval. */
+  async rotateAccountRequestKey(
+    newSigningKey: Uint8Array | KeyObject,
+  ): Promise<RequestKeyRegistration> {
+    return this.rotateRequestKeyAt(
+      ACCOUNT_REQUEST_KEY_PATH,
+      "rotateAccountRequestKey",
+      newSigningKey,
     );
   }
 
@@ -1307,8 +1356,10 @@ export class VerdifaxClient {
    *  holds the request open up to that many seconds for the next event, and
    *  this call's timeout is at least the wait plus 30 seconds. With
    *  `asOwner` it reads GET /account/signals with the owner key. Bad
-   *  options are refused before sending. Save the events and check them
-   *  with `verdifax-verify --signals`. */
+   *  options are refused before sending. A page that reaches the feed's end
+   *  carries the feed's head statement in `head`, anchored on the public
+   *  log; it is not an event. Save the page and check it with
+   *  `verdifax-verify --signals`. */
   async getSignals(options: GetSignalsOptions = {}): Promise<Sealed<SignalPage>> {
     this.requireAPIKey();
     const read = signalsRead(options, "getSignals", this.timeoutMs);
@@ -1332,11 +1383,18 @@ export class VerdifaxClient {
    *  before's `next_after`, waits up to `wait` seconds (default 25) when
    *  there is no event, and is retried like any GET. A read that still
    *  fails throws {@link SignalFeedError}, whose `lastSequence` is the last
-   *  sequence yielded: follow again from there and nothing is lost. Bad
-   *  options are refused here, before anything is sent. */
+   *  sequence yielded and whose `afterEventHash` is that event's hash: follow
+   *  again from there with both and nothing is lost. Bad
+   *  options are refused here, before anything is sent. A page's feed head
+   *  is never yielded as an event. The returned follower's `head` is the
+   *  newest head kept: one whose `sequence` is its page's `next_after` and
+   *  whose `head_hash` is the `event_hash` of the last event you finished,
+   *  kept once you have moved past every event on that page, so it never
+   *  states the feed beyond the events you handled. Each newer head kept
+   *  is also passed to `onHead`. */
   followSignals(
     options: FollowSignalsOptions = {},
-  ): AsyncGenerator<SignalEvent, void, undefined> {
+  ): SignalFollower {
     this.requireAPIKey();
     const start = followStart(options);
     return followSignalFeed(

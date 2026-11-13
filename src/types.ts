@@ -935,6 +935,38 @@ export interface OwnerSignature {
   nonce: string;
 }
 
+/** Every account-change action, in the server's order. A key's holder
+ *  registers its first request key (`request_key.registered`), replaces it
+ *  with the current key's approval (`request_key.rotated`) or clears it
+ *  (`request_key.cleared`, decided by `owner` with the approval, or by
+ *  `verdifax_admin` with none). */
+export type AccountChangeAction =
+  | "account.created"
+  | "request_key.cleared"
+  | "key.tier_set"
+  | "key.submitter_class_set"
+  | "key.billing_set"
+  | "owner_key.replacement_requested"
+  | "setting.owner_replacement"
+  | "setting.verdifax_deletion"
+  | "request_key.registered"
+  | "request_key.rotated";
+
+/** A key's current request key approving the change to its next one, as an
+ *  account change seals it: its signature over the new public key, or over
+ *  the empty key for a clear, the same bytes {@link requestKeyChangePreimage}
+ *  builds and {@link VerdifaxClient.rotateRequestKey} and
+ *  {@link VerdifaxClient.clearRequestKey} sign. Verdifax never holds that
+ *  key, so the approval shows the holder of the key before made the change,
+ *  and `verdifax-verify` follows each key's chain from its registration. */
+export interface RequestKeyApproval {
+  /** The base64 request public key being replaced or cleared. */
+  public_key: string;
+  signature: string;
+  signed_at: string;
+  nonce: string;
+}
+
 /** One change to an account's settings or to one of its keys' terms,
  *  verdifax.account-change.v1, by the owner or by Verdifax: the entry of an
  *  `account.changed` feed event, sealed with its place in the account's
@@ -942,22 +974,27 @@ export interface OwnerSignature {
  *  it. */
 export interface AccountChange {
   format: string;
-  /** `account.created`, `request_key.cleared`, `key.tier_set`,
-   *  `key.submitter_class_set`, `key.billing_set`,
-   *  `owner_key.replacement_requested`, `setting.owner_replacement` or
-   *  `setting.verdifax_deletion`. */
-  action: string;
-  /** Who decided: the account's `owner`, or `verdifax_admin`. */
+  /** One of {@link AccountChangeAction}; a newer server may send another. */
+  action: AccountChangeAction | (string & {});
+  /** Who decided: the account's `owner`, or `verdifax_admin`. A key's
+   *  holder registering, rotating or clearing its own request key is the
+   *  account's side, `owner`. */
   decided_by: "owner" | "verdifax_admin";
   /** The key a key action changes, and 0 otherwise. */
   key_id: number;
   /** The new value: a tier, a submitter class, linked or unlinked, allowed
-   *  or blocked, a claim expiry, or empty. */
+   *  or blocked, a claim expiry, a registered or rotated request key's
+   *  base64 public key, or empty. */
   value: string;
   changed_at: string;
   /** On a change the owner decided, the owner's request-key signature over
-   *  the account, the action and the value. */
+   *  the account, the action and the value. A key holder's change to its
+   *  own request key carries none: it is approved by that key. */
   owner_signature?: OwnerSignature;
+  /** On `request_key.rotated`, and on `request_key.cleared` decided by
+   *  `owner`, the current request key's approval of the change. A first
+   *  registration, and a clear by Verdifax, carry none. */
+  request_key_approval?: RequestKeyApproval;
   /** The change's place in the account's signal feed. */
   signal: { signal_account: string; signal_sequence: number; signal_previous_hash: Hex64 };
   account_change_hash: Hex64;
@@ -979,6 +1016,14 @@ export interface RunDeletion {
   /** The record's job and step, when it had one. */
   job_id?: string;
   step_id?: string;
+  /** The deleted record's own job links, on a job step deleted since this
+   *  server release: present, possibly empty, on such a tombstone, and
+   *  absent on one written before, which cannot vouch for the links. */
+  job_links?: DeletedJobLinks;
+  /** The public-log entries of the deleted record, decimal entry numbers in
+   *  ascending order, so the log still accounts for every entry once the
+   *  record is gone. Absent when there are none. */
+  log_entries?: string[];
   changed_at: string;
   /** On a deletion the owner decided, the owner's request-key signature
    *  over the account, the run and its record hash. */
@@ -986,6 +1031,19 @@ export interface RunDeletion {
   signal: { signal_account: string; signal_sequence: number; signal_previous_hash: Hex64 };
   deletion_hash: Hex64;
   anchor?: unknown;
+}
+
+/** A deleted job step's own links, as its job link held them, sealed in its
+ *  {@link RunDeletion} tombstone so the job stays checkable without the
+ *  record. The server leaves out an empty list and a false `final`. */
+export interface DeletedJobLinks {
+  /** The records the step followed: sorted, distinct, 64 lowercase hex
+   *  characters each, at most 64. */
+  previous_record_hashes?: string[];
+  /** Its links to other accounts' records: the same form, at most 16. */
+  external_previous?: string[];
+  /** True when the step closed the job. */
+  final?: boolean;
 }
 
 /** Returned by {@link VerdifaxClient.setAccountSetting}. */
@@ -1404,7 +1462,8 @@ export type SignalKind =
    *  would have made. */
   | "chain.interrupted"
   /** A change to the account's settings or to one of its keys' terms, by
-   *  the owner or by Verdifax: its entry is an {@link AccountChange}. */
+   *  the owner or by Verdifax, including each request key registered,
+   *  rotated or cleared: its entry is an {@link AccountChange}. */
   | "account.changed"
   /** One of the account's records deleted, by the owner or by Verdifax: its
    *  entry is the {@link RunDeletion} tombstone. */
@@ -1430,8 +1489,17 @@ export interface SignalEventData {
    *  failed run. */
   reason?: string;
   /** The sealed entry the event names, in the exact form
-   *  `verdifax-verify` reads. */
-  entry: Record<string, unknown>;
+   *  `verdifax-verify` reads. Null on an event whose entry is a record that
+   *  was deleted, the receipt event of a refused, halted or failed run: the
+   *  record's tombstone is then in `deleted`. An event that is its own
+   *  sealed record, such as `run.sealed`, keeps its entry. */
+  entry: Record<string, unknown> | null;
+  /** On an event whose entry is a record that was deleted, that record's
+   *  sealed {@link RunDeletion} tombstone, served in place of the entry. The
+   *  event's hash then covers the record hash the tombstone names, so the
+   *  feed still verifies without the record. Like every object read from
+   *  the server, it keeps its exact text in `sealedJson`. */
+  deleted?: RunDeletion;
 }
 
 /** One control signal, as a CloudEvents 1.0 envelope. */
@@ -1447,6 +1515,26 @@ export interface SignalEvent {
   data: SignalEventData;
 }
 
+/** The head of an account's signal feed, verdifax.feed-head.v1: a
+ *  statement Verdifax makes when it serves the feed's end, naming the feed's
+ *  highest event (`sequence`) and that event's hash (`head_hash`), anchored
+ *  on the public log. It is not an event. `verdifax-verify --signals` then
+ *  says the saved feed is complete as of the log's integration time for that
+ *  entry, and fails a feed that ends below the head's event; without a head
+ *  it says a later event may exist. Like every object read from the server,
+ *  it keeps its exact text in `sealedJson`. */
+export interface FeedHead {
+  format: "verdifax.feed-head.v1";
+  /** The account, `account-N`. */
+  account: string;
+  sequence: number;
+  head_hash: Hex64;
+  stated_at: string;
+  head_statement_hash: Hex64;
+  /** The public-log anchor, receipt kind `feed_head`. */
+  anchor?: unknown;
+}
+
 /** One page of the feed. Returned by {@link VerdifaxClient.getSignals}. */
 export interface SignalPage {
   /** The events after the place asked for, oldest first. */
@@ -1456,6 +1544,28 @@ export interface SignalPage {
   next_after: number;
   /** The newest sequence in the account's feed, 0 when it is empty. */
   newest: number;
+  /** On a page that reaches the feed's end, the feed's head statement.
+   *  A page that stops before the end, or whose head could not be made and
+   *  anchored, carries none. */
+  head?: FeedHead;
+}
+
+/** Returned by {@link VerdifaxClient.followSignals}: the events, one at a
+ *  time, and `head`, the newest feed head kept. The head is never handed
+ *  out as an event. */
+export interface SignalFollower
+  extends AsyncGenerator<SignalEvent, void, undefined> {
+  /** The newest {@link FeedHead} kept: the head of a page that reaches the
+   *  feed's end, whose `sequence` is the page's `next_after` and whose
+   *  `head_hash` is the `event_hash` of the last event the caller finished,
+   *  kept once the caller has moved past every event on that page. It
+   *  states the feed through the last event the caller handled, never
+   *  beyond it. A head on a page the caller stopped inside, or one that
+   *  does not match the page's `next_after` or the last event's hash, is
+   *  not kept. Before the caller finishes an event in this follow, the last
+   *  event's hash is the `afterEventHash` option, when given. Undefined
+   *  until a head is kept. Read-only. */
+  readonly head: FeedHead | undefined;
 }
 
 /** Options for {@link VerdifaxClient.getSignals}. */
@@ -1481,6 +1591,19 @@ export interface FollowSignalsOptions {
   /** Read GET /account/signals with the owner key instead of GET /signals
    *  with a feed key. */
   asOwner?: boolean;
+  /** Called with each newer feed head the follower keeps, once the caller
+   *  has moved past every event on the head's page, and before the next
+   *  page is read: the same head as the follower's `head`. A head already
+   *  kept is not passed again. What it throws ends the follow loop
+   *  unchanged. Anything but a function is refused before sending. */
+  onHead?: (head: FeedHead) => void;
+  /** The `event_hash` of event `after`, as you saved it with that event's
+   *  sequence: 64 lowercase hex characters. A follower resuming at the
+   *  feed's end has no new event to finish, so with it the follower keeps
+   *  a head for event `after` that names this hash. Left out, a head is
+   *  kept only once you finish an event in this follow; an empty string is
+   *  the same as leaving it out. Anything else is refused before sending. */
+  afterEventHash?: string;
 }
 
 /** Options for {@link VerdifaxClient.createFeedKey}. */

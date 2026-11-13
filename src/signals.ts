@@ -18,17 +18,19 @@ import { SignalFeedError, VerdifaxError } from "./errors.js";
 import { parseSealed } from "./sealed.js";
 import type {
   CreateWebhookOptions,
+  FeedHead,
   FollowSignalsOptions,
   GetSignalsOptions,
   ListWebhookDeliveriesOptions,
   SignalEvent,
   SignalEventHashFields,
+  SignalFollower,
   SignalKind,
   SignalPage,
   VerifyWebhookOptions,
   WebhookHeaders,
 } from "./types.js";
-import { asOwnerOf } from "./validation.js";
+import { asOwnerOf, validateHex64 } from "./validation.js";
 
 const SIGNAL_FORM = "verdifax.signal.v1";
 export const SIGNALS_PATH = "/signals";
@@ -108,6 +110,8 @@ export interface FollowStart {
   after: number;
   wait: number;
   asOwner: boolean;
+  onHead?: (head: FeedHead) => void;
+  afterEventHash?: string;
 }
 
 /** Checks the options of followSignals before anything is sent. */
@@ -116,9 +120,22 @@ export function followStart(options: FollowSignalsOptions | undefined): FollowSt
   const asOwner = asOwnerOf(options, method);
   const after = given(options?.after, 0);
   const wait = given(options?.wait, DEFAULT_FOLLOW_WAIT_SECONDS);
+  const onHead = options?.onHead;
   requireAfter(after, method);
   requireWait(wait, method);
-  return { after, wait, asOwner };
+  if (onHead !== undefined && typeof onHead !== "function") {
+    throw new VerdifaxError(`verdifax: ${method} onHead must be a function`);
+  }
+  // An empty afterEventHash is the same as none, as in the Go SDK.
+  const savedHash = options?.afterEventHash;
+  const afterEventHash = savedHash === "" ? undefined : savedHash;
+  if (afterEventHash !== undefined) {
+    validateHex64(afterEventHash, `${method} afterEventHash`);
+  }
+  const out: FollowStart = { after, wait, asOwner };
+  if (onHead !== undefined) out.onHead = onHead;
+  if (afterEventHash !== undefined) out.afterEventHash = afterEventHash;
+  return out;
 }
 
 /** Reads page after page from `after`, handing out each event once, in
@@ -128,12 +145,67 @@ export function followStart(options: FollowSignalsOptions | undefined): FollowSt
  *  and with `wait` 0 the loop pauses a second first. A read that still
  *  fails after the client's retries ends the loop with a
  *  {@link SignalFeedError} carrying the last sequence handed out. It runs
- *  until the caller stops it, with `break` or `return`. */
-export async function* followSignalFeed(
+ *  until the caller stops it, with `break` or `return`.
+ *
+ *  A page's feed head is not an event and is never handed out (round 61,
+ *  N23). The follower keeps the newest head that states the feed through
+ *  the last event the caller handled: a head is kept only when its
+ *  `sequence` is the page's `next_after` and its `head_hash` is the
+ *  `event_hash` of the last event the caller finished, and only once the
+ *  caller has moved past every event on that page, so a head is never kept
+ *  for an event the caller has not handled. Before the caller finishes an
+ *  event in this follow, the last event's hash is `afterEventHash`, the
+ *  saved `event_hash` of event `after`, so a follower resuming at the
+ *  feed's end keeps the head it is served; without it, no head is kept
+ *  until the caller finishes an event. A head already kept, read again
+ *  on an idle poll, is not kept again. Each newer head kept is the
+ *  follower's `head` and is passed to `onHead`. */
+export function followSignalFeed(
   read: (after: number) => Promise<SignalPage>,
   start: FollowStart,
+): SignalFollower {
+  const kept: { head: FeedHead | undefined } = { head: undefined };
+  const follower = followPages(read, start, kept);
+  Object.defineProperty(follower, "head", {
+    get: () => kept.head,
+    enumerable: true,
+  });
+  return follower as SignalFollower;
+}
+
+/** Whether `next`, a page's head, is one to keep over `kept`, matching the
+ *  Go SDK's newerFeedHead: it is an object that states the feed through
+ *  `handled`, the page's `next_after`, names `handledHash`, the
+ *  `event_hash` of the last event the caller finished, as its `head_hash`,
+ *  and is another statement than `kept`, at kept's event or later. */
+function newerFeedHead(
+  kept: FeedHead | undefined,
+  next: unknown,
+  handled: number,
+  handledHash: string | undefined,
+): next is FeedHead {
+  if (typeof next !== "object" || next === null || Array.isArray(next)) {
+    return false;
+  }
+  const head = next as FeedHead;
+  if (head.sequence !== handled) return false;
+  if (handledHash === undefined || head.head_hash !== handledHash) return false;
+  return (
+    kept === undefined ||
+    (head.sequence >= kept.sequence &&
+      head.head_statement_hash !== kept.head_statement_hash)
+  );
+}
+
+async function* followPages(
+  read: (after: number) => Promise<SignalPage>,
+  start: FollowStart,
+  kept: { head: FeedHead | undefined },
 ): AsyncGenerator<SignalEvent, void, undefined> {
   let last = start.after;
+  // The event_hash of the last event the caller finished in this follow,
+  // or the caller's afterEventHash before the first.
+  let lastHash: string | undefined = start.afterEventHash;
   for (;;) {
     let page: SignalPage;
     try {
@@ -142,13 +214,21 @@ export async function* followSignalFeed(
       throw new SignalFeedError(
         last,
         err instanceof Error ? err.message : String(err),
-        { cause: err },
+        { cause: err, afterEventHash: lastHash },
       );
     }
-    const events = pageEvents(page, last);
+    const events = pageEvents(page, last, lastHash);
     for (const event of events) {
       yield event;
       last = event.data.sequence;
+      lastHash = event.data.event_hash;
+    }
+    // Reached only when the caller asked for the event after the page's
+    // last one: every event on the page is handled. A caller that stops
+    // inside the page never gets here, so its head is not kept.
+    if (newerFeedHead(kept.head, page.head, page.next_after, lastHash)) {
+      kept.head = page.head;
+      start.onHead?.(page.head);
     }
     if (events.length === 0 && start.wait === 0) {
       await new Promise((r) => setTimeout(r, EMPTY_PAGE_PAUSE_MS));
@@ -157,11 +237,18 @@ export async function* followSignalFeed(
 }
 
 /** The page's events, after checking each follows the one before and that
- *  `next_after` is the last event's sequence, or `after` for an empty page. */
-function pageEvents(page: SignalPage, after: number): SignalEvent[] {
+ *  `next_after` is the last event's sequence, or `after` for an empty page.
+ *  A refusal carries `after` and `afterHash`, the event_hash of event
+ *  `after` when known, so the caller can follow again from there. */
+function pageEvents(
+  page: SignalPage,
+  after: number,
+  afterHash: string | undefined,
+): SignalEvent[] {
+  const where = { afterEventHash: afterHash };
   const events = page?.events ?? [];
   if (!Array.isArray(events)) {
-    throw new SignalFeedError(after, "the server's page has no events list");
+    throw new SignalFeedError(after, "the server's page has no events list", where);
   }
   let previous = after;
   for (const event of events) {
@@ -170,6 +257,7 @@ function pageEvents(page: SignalPage, after: number): SignalEvent[] {
       throw new SignalFeedError(
         after,
         `the server's page holds an event out of order (sequence ${String(sequence)} after ${previous})`,
+        where,
       );
     }
     previous = sequence;
@@ -178,6 +266,7 @@ function pageEvents(page: SignalPage, after: number): SignalEvent[] {
     throw new SignalFeedError(
       after,
       `the server's next_after ${String(page?.next_after)} is not the last sequence on its page (${previous})`,
+      where,
     );
   }
   return events;
@@ -499,7 +588,11 @@ function singleHeader(headers: WebhookHeaders, name: string): string {
  * sign-off recorded later is seen (round 58, B7). A run whose deletion is
  * among `events`, a `run.deleted` event naming its run, is left out
  * wherever that event stands in the list: its record is gone, so no
- * sign-off can be given on it. Returned in feed order.
+ * sign-off can be given on it. A `run.sealed` or `run.deleted` event that
+ * names no run (a null entry, or a run id that is not a whole number above
+ * zero) is refused with {@link VerdifaxError}: the server serves every
+ * `run.sealed` event with its own entry, even after the run is deleted.
+ * Returned in feed order.
  */
 export function pendingSignOffs(events: readonly SignalEvent[]): number[] {
   const order: number[] = [];
@@ -510,8 +603,11 @@ export function pendingSignOffs(events: readonly SignalEvent[]): number[] {
   for (const e of events) {
     const entry = (e.data?.entry ?? {}) as Record<string, unknown>;
     if (e.data?.kind === "run.sealed") {
+      // The server serves every run.sealed event with its own entry, even
+      // after the run is deleted, so one that names no run, a null entry or
+      // run 0 included, is refused, never skipped.
       const run = entry.run_id;
-      if (typeof run !== "number") {
+      if (!isRunId(run)) {
         throw new VerdifaxError(`verdifax: the run.sealed entry of event ${e.id} names no run`);
       }
       if (entry.signoff_required === true && !required.has(run)) {
@@ -520,7 +616,7 @@ export function pendingSignOffs(events: readonly SignalEvent[]): number[] {
       }
     } else if (e.data?.kind === "run.deleted") {
       const run = entry.run_id;
-      if (typeof run !== "number") {
+      if (!isRunId(run)) {
         throw new VerdifaxError(`verdifax: the run.deleted entry of event ${e.id} names no run`);
       }
       deleted.add(run);
@@ -539,3 +635,7 @@ export function pendingSignOffs(events: readonly SignalEvent[]): number[] {
   return order.filter((run) => !deleted.has(run) && inForce(run) !== "approve");
 }
 
+/** A run id as the server gives one: a whole number above zero. */
+function isRunId(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) > 0;
+}
