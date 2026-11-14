@@ -41,7 +41,7 @@ export {
   signRequest,
   signRequestV2,
 } from "./signing.js";
-export { pendingSignOffs, signalEventHash, verifyWebhook } from "./signals.js";
+export { pendingSignOffs, signalEventHash, verifyWebhook, WEBHOOK_DELETED, WEBHOOK_SUBSCRIBED, webhookValue } from "./signals.js";
 export {
   validateHex64,
   validateJobName,

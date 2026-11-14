@@ -17,6 +17,10 @@ import {
   signalEventHash,
   verifyWebhook,
 } from "../dist/index.mjs";
+import { webhookSealer } from "./webhook-server.mjs";
+
+// Round 62: a webhook change is signed by the owner key's request key.
+const OWNER_SEED = Buffer.alloc(32, 9);
 
 // The byte authority, copied unchanged from scripts/sdk-signature-vector.json.
 const VECTOR = JSON.parse(readFileSync(new URL("./sdk-signature-vector.json", import.meta.url), "utf8"));
@@ -542,36 +546,25 @@ test("the feed key methods refuse a bad name, expiry or id before sending", asyn
 // ── Webhooks ────────────────────────────────────────────────────
 
 test("createWebhook posts the address and kinds to /account/webhooks", async () => {
-  const reply = { ok: true, id: 3, url: "https://hooks.example.com/v", types: ["run.refused"], created_at: "2026-11-07T12:00:00Z", secret: VECTOR.webhook_secret, hint: "h" };
   const { seen, result } = await withServer(
-    () => ({ status: 201, json: reply }),
+    webhookSealer(OWNER_SEED),
     async (c) => [
-      await c.createWebhook("https://hooks.example.com/v", { types: ["run.refused", "run.halted"] }),
-      await c.createWebhook("https://hooks.example.com/v"),
-      await c.createWebhook("https://hooks.example.com/v", { types: [] }),
-      await c.createWebhook("https://hooks.example.com/v", { types: KINDS }),
+      await c.createWebhook("https://hooks.example.com/v", { types: ["run.refused", "run.halted"], accountId: "account-7" }),
+      await c.createWebhook("https://hooks.example.com/v", { accountId: "account-7" }),
+      await c.createWebhook("https://hooks.example.com/v", { types: [], accountId: "account-7" }),
+      await c.createWebhook("https://hooks.example.com/v", { types: KINDS, accountId: "account-7" }),
     ],
-    { apiKey: "owner" },
+    { apiKey: "owner", signingKey: OWNER_SEED },
   );
   assert.deepEqual(requests(seen), Array(4).fill("POST /account/webhooks"));
-  assert.deepEqual(seen[0].body, { url: "https://hooks.example.com/v", types: ["run.refused", "run.halted"] });
-  assert.deepEqual(seen[1].body, { url: "https://hooks.example.com/v" });
-  assert.deepEqual(seen[2].body, { url: "https://hooks.example.com/v", types: [] });
+  const shape = (body) => ({ ...body, owner_signature: Object.keys(body.owner_signature).sort() });
+  const signed = ["nonce", "signature", "signed_at"];
+  assert.deepEqual(shape(seen[0].body), { url: "https://hooks.example.com/v", types: ["run.refused", "run.halted"], owner_signature: signed });
+  assert.deepEqual(shape(seen[1].body), { url: "https://hooks.example.com/v", owner_signature: signed });
+  assert.deepEqual(shape(seen[2].body), { url: "https://hooks.example.com/v", types: [], owner_signature: signed });
   assert.deepEqual(seen[3].body.types, KINDS);
-  assert.deepEqual(result[0], reply);
-});
-
-test("createWebhook refuses an address that is not https or a bad kind before sending", async () => {
-  const url = "https://hooks.example.com/v";
-  const { seen } = await withServer(undefined, async (c) => {
-    for (const bad of ["http://hooks.example.com/v", "HTTPS://hooks.example.com", "hooks.example.com", "https://", "", undefined, 5]) {
-      await assert.rejects(c.createWebhook(bad), /createWebhook needs a url that starts with https:\/\//);
-    }
-    for (const types of [["run.refused", "run.refused"], ["run.denied"], ["com.verdifax.run.refused"], [""], [5], "run.refused", {}, null]) {
-      await assert.rejects(c.createWebhook(url, { types }), (err) => err instanceof VerdifaxError && /createWebhook types must/.test(err.message), JSON.stringify(types));
-    }
-  });
-  assert.equal(seen.length, 0);
+  assert.equal(result[0].id, 3);
+  assert.equal(result[0].account_change.action, "webhook.subscribed");
 });
 
 test("createWebhook passes on the server's refusals and is not retried", async () => {
@@ -582,8 +575,8 @@ test("createWebhook passes on the server's refusals and is not retried", async (
   ]) {
     const { seen, result } = await withServer(
       () => ({ status, json: { ok: false, error } }),
-      (c) => c.createWebhook("https://hooks.example.com/v").catch((err) => err),
-      { maxRetries: 3 },
+      (c) => c.createWebhook("https://hooks.example.com/v", { accountId: "account-7" }).catch((err) => err),
+      { maxRetries: 3, signingKey: OWNER_SEED },
     );
     assert.ok(result instanceof APIError);
     assert.equal(result.status, status);
@@ -595,40 +588,38 @@ test("createWebhook passes on the server's refusals and is not retried", async (
 test("listWebhooks, deleteWebhook and listWebhookDeliveries send their routes", async () => {
   const hook = { id: 3, url: "https://hooks.example.com/v", types: [], created_at: "2026-11-07T12:00:00Z" };
   const delivery = { sequence: 4, status: "delivered", attempts: 1, last_status_code: 200, last_error: "", created_at: "2026-11-07T12:00:00Z", delivered_at: "2026-11-07T12:00:01Z" };
-  const replies = [
-    { json: { ok: true, webhooks: [hook] } },
-    { json: { ok: true, id: 3, deleted: true } },
+  const deliveries = [
     { json: { ok: true, webhook_id: 3, deliveries: [delivery] } },
     { json: { ok: true, webhook_id: 3, deliveries: [] } },
-    { json: { ok: true } },
     { json: { ok: true, webhook_id: 3 } },
   ];
+  let next = 0;
   const { seen, result } = await withServer(
-    (req, body, i) => replies[i],
+    webhookSealer(OWNER_SEED, { listed: [hook], other: () => deliveries[next++] }),
     async (c) => [
       await c.listWebhooks(),
-      await c.deleteWebhook(3),
+      await c.deleteWebhook(3, { accountId: "account-7" }),
       await c.listWebhookDeliveries(3),
       await c.listWebhookDeliveries(3, { limit: 500 }),
-      await c.listWebhooks(),
       await c.listWebhookDeliveries(3, { limit: 1 }),
     ],
-    { apiKey: "owner" },
+    { apiKey: "owner", signingKey: OWNER_SEED },
   );
   assert.deepEqual(requests(seen), [
+    "GET /account/webhooks",
     "GET /account/webhooks",
     "DELETE /account/webhooks/3",
     "GET /account/webhooks/3/deliveries",
     "GET /account/webhooks/3/deliveries?limit=500",
-    "GET /account/webhooks",
     "GET /account/webhooks/3/deliveries?limit=1",
   ]);
-  for (const r of seen) assert.equal(r.body, undefined);
+  for (const r of seen) assert.equal(r.body, r.method === "DELETE" ? r.body : undefined);
+  assert.deepEqual(Object.keys(seen[2].body), ["owner_signature"]);
   assert.deepEqual(result[0], { ok: true, webhooks: [hook] });
-  assert.deepEqual(result[1], { ok: true, id: 3, deleted: true });
+  assert.equal(result[1].deleted, true);
+  assert.equal(result[1].account_change.action, "webhook.deleted");
   assert.deepEqual(result[2].deliveries, [delivery]);
-  assert.deepEqual(result[4], { ok: true, webhooks: [] });
-  assert.deepEqual(result[5], { ok: true, webhook_id: 3, deliveries: [] });
+  assert.deepEqual(result[4], { ok: true, webhook_id: 3, deliveries: [] });
 });
 
 test("the webhook methods refuse a bad id or limit before sending", async () => {

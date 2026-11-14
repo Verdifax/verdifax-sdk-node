@@ -122,9 +122,9 @@ if (v.verified) {
 | `client.followSignals({ after?, wait?, asOwner? })` | `GET /signals` page after page, or `GET /account/signals` with `asOwner` | feed key, or owner key |
 | `client.createFeedKey(name, { expiresAt? })` | `POST /account/feed-keys` | owner key |
 | `client.revokeFeedKey(id)` | `DELETE /account/feed-keys/{id}` | owner key |
-| `client.createWebhook(url, { types? })` | `POST /account/webhooks` | owner key |
+| `client.createWebhook(url, { types?, accountId? })` | `POST /account/webhooks` | owner key, signed by its request key |
 | `client.listWebhooks()` | `GET /account/webhooks` | owner key |
-| `client.deleteWebhook(id)` | `DELETE /account/webhooks/{id}` | owner key |
+| `client.deleteWebhook(id, { accountId? })` | `DELETE /account/webhooks/{id}` | owner key, signed by its request key |
 | `client.listWebhookDeliveries(id, { limit? })` | `GET /account/webhooks/{id}/deliveries` | owner key |
 | `client.getFailureReceipt(id)` | `GET /runs/{id}/failure-receipt` | required |
 | `client.adminCreateKey(name, { accountId? })` | `POST /admin/keys` | admin |
@@ -139,7 +139,7 @@ if (v.verified) {
 
 `client.job(jobId)` returns a [job helper](#jobs) and makes no request until a step runs.
 
-These functions make no request: `captureEnvironment`, `formatProviderPayload`, `signRequest`, `signRequestV2`, `requestKeyRegistrationBody`, `requestKeyChangeApproval`, `requestKeyChangePreimage`, `policyActivationApproval`, `policyActivationPreimage`, `ownerChangePreimage`, `signOffPreimage`, `approverKeyProof`, `verifyWebhook`, `signalEventHash`, `requestSignaturePreimage`, `requestSignaturePreimageV2`, `generateRequestKeyPair`, `validateHex64`, `validateJobName`, `validateRouteId`, `dseDispatchHash`, `dcaeClosureHash` and `cresReceiptHash`. `RUN_STATUSES` lists every run status the server uses, and `EXECUTE_FIELDS` lists every top-level key a run request may hold.
+These functions make no request: `captureEnvironment`, `formatProviderPayload`, `signRequest`, `signRequestV2`, `requestKeyRegistrationBody`, `requestKeyChangeApproval`, `requestKeyChangePreimage`, `policyActivationApproval`, `policyActivationPreimage`, `ownerChangePreimage`, `signOffPreimage`, `approverKeyProof`, `verifyWebhook`, `webhookValue`, `signalEventHash`, `requestSignaturePreimage`, `requestSignaturePreimageV2`, `generateRequestKeyPair`, `validateHex64`, `validateJobName`, `validateRouteId`, `dseDispatchHash`, `dcaeClosureHash` and `cresReceiptHash`. `RUN_STATUSES` lists every run status the server uses, and `EXECUTE_FIELDS` lists every top-level key a run request may hold.
 
 `getRunArtifacts`, `getPublicBundle` and `getPublicBundleByToken` return the exact JSON text the server sent, so you can save it and check it with `verdifax-verify`.
 
@@ -319,7 +319,7 @@ The account's view covers the runs its keys made through Verdifax. It does not c
 
 `rotateAccountRequestKey(newSigningKey)` replaces the owner key's request key as `rotateRequestKey` does for a key's own: the new key proves itself, the current key, the client's `signingKey`, approves the change, and the client signs with the new key only after the server accepts it. A refusal, including an `APIError` (409) when another change replaced the request key first, leaves the client with its current key. The rotation is sealed in the account's signal feed as a `request_key.rotated` account change carrying the approval, so the owner key's request-key chain can be followed from its registration.
 
-The owner sets two blocks on Verdifax with `setAccountSetting(setting, value)`. While `owner-replacement` is `blocked`, Verdifax cannot replace, revoke or start a replacement of the owner key. While `verdifax-deletion` is `blocked`, Verdifax cannot delete one of the account's records. `value` is `allowed` or `blocked`, and `getAccount` shows both as `owner_replacement` and `verdifax_deletion`. Each change is sealed in the account's signal feed as an `account.changed` event. Asking for the value already set changes nothing, and `account_change` is then null.
+The owner sets two blocks on Verdifax with `setAccountSetting(setting, value)`. While `owner-replacement` is `blocked`, Verdifax cannot replace, revoke or start a replacement of the owner key, and from verifier v0.35.0's server release on it cannot clear the owner key's request key either. While `verdifax-deletion` is `blocked`, Verdifax cannot delete one of the account's records. `value` is `allowed` or `blocked`, and `getAccount` shows both as `owner_replacement` and `verdifax_deletion`. Each change is sealed in the account's signal feed as an `account.changed` event. Asking for the value already set changes nothing, and `account_change` is then null.
 
 `deleteRun(runId, recordHash)` deletes one of the account's records. `recordHash` is a completed run's `record_hash`, or a stopped run's receipt hash, and the server refuses a hash that is not this run's with an HTTP 409. A public record must be withdrawn first with `unpublishRun`. The record's tombstone, which names the exact record, stays in the signal feed as a `run.deleted` event.
 
@@ -441,7 +441,11 @@ An event whose entry is a record that was deleted, the receipt event of a refuse
 
 `pendingSignOffs(events)` returns, in feed order, the run ids whose allowing policy rule requires a person's sign-off (their `run.sealed` event says `signoff_required`) and on which no approval is in force, read as `verdifax-verify` reads it: the latest sign-off on the run's whole job governs when there is one, and otherwise the latest sign-off on its record; a receipt sign-off does not count. Pass the feed from its start, or pages that include each run's sign-offs. A run whose deletion is in the events given, a `run.deleted` event for that run wherever it stands, is left out: its record is gone. A `run.sealed` or `run.deleted` entry that does not name a whole number above zero (a null entry, 0, a negative or fractional number, or a string) is refused with `VerdifaxError`; earlier releases accepted run 0, and the shared pending sign-offs vector holds all four SDKs to this. It makes no request.
 
-The owner key subscribes an https address with `createWebhook(url, { types })`, at most ten per account. `types` are the kinds to deliver, each once; empty or left out takes every kind. The secret, `whsec_` and base64, is in the result this once. Each delivery is signed under the Standard Webhooks scheme. Check it with `verifyWebhook` before you use it, passing the body exactly as received:
+The owner key subscribes an https address with `createWebhook(url, { types, accountId })`, at most ten per account, from a client whose `signingKey` is the owner key's request key. `types` are the kinds to deliver, each once; empty or left out takes every kind. The secret, `whsec_` and base64, is in the result this once.
+
+From verifier v0.35.0's server release on, a webhook is added and removed only with its record in the account's feed: an `account.changed` event, `webhook.subscribed` or `webhook.deleted`, signed by the owner's request key over `webhookValue(url, types)`, which is `sha256=` and the SHA-256 of the address exactly as sent, then ` kinds=` and the kinds sorted and joined with commas, or `all`. The record never holds the address, which can carry a token, and Verdifax, which never holds the owner's request key, cannot add a destination for the account's events. Send the address exactly as the server stores it: the server refuses another form with HTTP 400 naming the stored one. `createWebhook` signs it; `deleteWebhook(id, { accountId })` reads the subscription from `listWebhooks()` and signs its value; both check the sealed record in the answer and throw `VerdifaxError` if it does not carry what was sent, and both refuse to send without the `signingKey` option. A new subscription receives its own record's event first, and a removed one is not sent the event that removes it. `verdifax-verify --signals` lists the subscriptions in place at the end of a feed read from its start. The shared vector `test/sdk-webhook-change-vector.json` fixes the value for all four SDKs.
+
+Each delivery is signed under the Standard Webhooks scheme. Check it with `verifyWebhook` before you use it, passing the body exactly as received:
 
 ```typescript
 import http from "node:http";

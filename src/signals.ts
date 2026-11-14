@@ -296,6 +296,23 @@ export function feedKeyBody(
 
 /** Checks a webhook's address and kinds and builds the request body. The
  *  server checks the address too: this is only the first check. */
+/** Round 62: the owner adds and removes a webhook only with a record in the
+ *  account's feed, signed by the owner key's request key over
+ *  {@link webhookValue}, so Verdifax cannot add a destination for the
+ *  account's events. */
+export const WEBHOOK_SUBSCRIBED = "webhook.subscribed";
+export const WEBHOOK_DELETED = "webhook.deleted";
+
+/** The value a webhook change seals and the owner signs: `sha256=` and the
+ *  SHA-256 of the address exactly as sent, as lowercase hex, then ` kinds=`
+ *  and the kinds sorted and joined with commas, or `all` when none are
+ *  named. The record never holds the address, which can carry a token.
+ *  Fixed by the shared vector sdk-webhook-change-vector.json. */
+export function webhookValue(url: string, types: readonly string[] = []): string {
+  const kinds = [...types].sort().join(",") || "all";
+  return `sha256=${createHash("sha256").update(url, "utf8").digest("hex")} kinds=${kinds}`;
+}
+
 export function webhookBody(
   url: string,
   options: CreateWebhookOptions | undefined,

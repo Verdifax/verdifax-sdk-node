@@ -954,9 +954,9 @@ test("the README describes the feed head and the sealed request-key changes", ()
   }
 });
 
-test("the 1.15.0 changelog entry comes first", () => {
+test("the 1.15.0 changelog entry is kept, after the newer ones", () => {
   const changelog = readFileSync(new URL("../CHANGELOG.md", import.meta.url), "utf8");
-  assert.match(changelog, /^# Changelog\n\n## 1\.15\.0\n/);
+  assert.match(changelog, /\n## 1\.15\.0\n/);
   assert.ok(changelog.includes("The user agent is `verdifax-sdk-node/1.15.0`."));
   assert.ok(changelog.includes("`pendingSignOffs` now refuses, with `VerdifaxError`, a `run.sealed` or `run.deleted` entry that does not name a whole number above zero: a null entry, 0, a negative or fractional number, or a string. Earlier releases accepted run 0. The shared pending sign-offs vector holds all four SDKs to this."));
 });

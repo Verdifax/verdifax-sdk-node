@@ -911,7 +911,8 @@ export interface Account {
   time_zone?: string;
   /** The owner's block on Verdifax replacing the owner key: while
    *  `blocked`, Verdifax cannot replace, revoke or start a replacement of
-   *  it. Set with {@link VerdifaxClient.setAccountSetting}. */
+   *  it, and from verifier v0.35.0's server release on it cannot clear its
+   *  request key either. Set with {@link VerdifaxClient.setAccountSetting}. */
   owner_replacement?: AccountSettingValue;
   /** The owner's block on Verdifax deleting one of the account's records:
    *  while `blocked`, Verdifax cannot delete one. Set with
@@ -1625,7 +1626,7 @@ export interface FeedKeyRevocation {
 }
 
 /** Options for {@link VerdifaxClient.createWebhook}. */
-export interface CreateWebhookOptions {
+export interface CreateWebhookOptions extends OwnerChangeOptions {
   /** The kinds to deliver, each once. Empty or left out takes every kind. */
   types?: SignalKind[];
 }
@@ -1646,6 +1647,9 @@ export interface CreatedWebhook extends Webhook {
   ok: boolean;
   secret: string;
   hint: string;
+  /** The subscription's record in the account's feed (round 62),
+   *  `webhook.subscribed`, signed by the owner's request key. */
+  account_change: AccountChange;
 }
 
 /** Returned by {@link VerdifaxClient.listWebhooks}. */
@@ -1659,6 +1663,9 @@ export interface WebhookDeletion {
   ok: boolean;
   id: number;
   deleted: boolean;
+  /** The removal's record in the account's feed (round 62),
+   *  `webhook.deleted`, signed by the owner's request key. */
+  account_change: AccountChange;
 }
 
 /** Options for {@link VerdifaxClient.listWebhookDeliveries}. */

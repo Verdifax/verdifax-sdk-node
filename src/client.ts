@@ -36,9 +36,13 @@ import {
   followStart,
   signalsRead,
   webhookBody,
+  webhookValue,
+  WEBHOOK_DELETED,
+  WEBHOOK_SUBSCRIBED,
   WEBHOOKS_PATH,
 } from "./signals.js";
 import type {
+  AccountChange,
   Account,
   AccountInfo,
   AccountSetting,
@@ -311,9 +315,9 @@ interface RawResponse {
  * | `followSignals(options)` | GET /signals page after page, or GET /account/signals with asOwner | feed key, or owner key |
  * | `createFeedKey(name, options)` | POST /account/feed-keys | owner key |
  * | `revokeFeedKey(id)` | DELETE /account/feed-keys/{id} | owner key |
- * | `createWebhook(url, options)` | POST /account/webhooks | owner key |
+ * | `createWebhook(url, options)` | POST /account/webhooks | owner key, signed by its request key |
  * | `listWebhooks()` | GET /account/webhooks | owner key |
- * | `deleteWebhook(id)` | DELETE /account/webhooks/{id} | owner key |
+ * | `deleteWebhook(id, options)` | DELETE /account/webhooks/{id} | owner key, signed by its request key |
  * | `listWebhookDeliveries(id, options)` | GET /account/webhooks/{id}/deliveries | owner key |
  * | `getFailureReceipt(id)` | GET /runs/{id}/failure-receipt | required |
  * | `job(jobId)` | none, returns a {@link VerdifaxJob} | none |
@@ -1074,18 +1078,23 @@ export class VerdifaxClient {
    *  /account, with the public key it verifies under. Refuses before any
    *  request without a signing key or with a label that is not
    *  `account-N`. */
+  /** The owner key's request key, or a refusal before anything is sent. */
+  private requireOwnerSigningKey(method: string): KeyObject {
+    if (!this.signingKey) {
+      throw new VerdifaxError(
+        `verdifax: ${method} needs the owner key's request key in the signingKey client option, because the server refuses an unsigned owner change`,
+      );
+    }
+    return this.signingKey;
+  }
+
   private async ownerSigned(
     method: string,
     change: string,
     subject: string,
     options: OwnerChangeOptions,
   ): Promise<SentOwnerSignature> {
-    if (!this.signingKey) {
-      throw new VerdifaxError(
-        `verdifax: ${method} needs the owner key's request key in the signingKey client option, because the server refuses an unsigned owner change`,
-      );
-    }
-    const signingKey = this.signingKey;
+    const signingKey = this.requireOwnerSigningKey(method);
     const given = options?.accountId;
     if (given !== undefined && (typeof given !== "string" || !ACCOUNT_CHAIN_ID.test(given))) {
       throw new VerdifaxError(
@@ -1428,22 +1437,41 @@ export class VerdifaxClient {
     return this.request<FeedKeyRevocation>("DELETE", `${FEED_KEYS_PATH}/${id}`);
   }
 
-  /** Subscribes an https address to the account's signals. `types` are the
-   *  kinds to deliver, each once; empty or left out takes every kind. The
-   *  secret, `whsec_` and base64, is in the result this once: check each
-   *  delivery with {@link verifyWebhook}. A delivery is a copy: the pull
-   *  feed and the public log are the record. The server checks the address
-   *  too, and refuses an eleventh subscription with HTTP 409. */
+  /** Subscribes an https address to the account's signals, with the owner
+   *  key. `types` are the kinds to deliver, each once; empty or left out
+   *  takes every kind. The secret, `whsec_` and base64, is in the result
+   *  this once: check each delivery with {@link verifyWebhook}. A delivery
+   *  is a copy: the pull feed and the public log are the record. The server
+   *  checks the address too, and refuses an eleventh subscription with HTTP
+   *  409.
+   *
+   *  From verifier v0.35.0's server release on, the subscription is added
+   *  only with its record in the account's feed, an `account.changed`
+   *  event `webhook.subscribed` signed by the owner key's request key over
+   *  {@link webhookValue}: the SHA-256 of the address, never the address,
+   *  and the kinds. So this needs the `signingKey` option and refuses to
+   *  send without it. Send the address exactly as the server stores it: the
+   *  server refuses another form with HTTP 400 naming the stored one. The
+   *  label, `account-N`, is read from {@link getAccount} unless `accountId`
+   *  is given. The record returned must seal the change, the value,
+   *  `decided_by` owner and the signature sent, or this throws
+   *  {@link VerdifaxError}. The new subscription receives its own record's
+   *  event first. */
   async createWebhook(
     url: string,
     options: CreateWebhookOptions = {},
   ): Promise<CreatedWebhook> {
     this.requireAPIKey();
-    return this.request<CreatedWebhook>(
-      "POST",
-      WEBHOOKS_PATH,
-      webhookBody(url, options),
-    );
+    const body = webhookBody(url, options);
+    const value = webhookValue(body.url, body.types ?? []);
+    const signed = await this.ownerSigned("createWebhook", WEBHOOK_SUBSCRIBED, value, options);
+    // The same body, in the same order, as every SDK sends: the address, the
+    // kinds when named, then the owner's signature.
+    const sent: { url: string; types?: string[]; owner_signature?: OwnerChangeSignature } = { url: body.url };
+    if (body.types !== undefined) sent.types = body.types;
+    sent.owner_signature = signed.owner_signature;
+    const out = await this.request<CreatedWebhook>("POST", WEBHOOKS_PATH, sent);
+    return checkWebhookChange(out, WEBHOOK_SUBSCRIBED, value, signed);
   }
 
   /** The account's webhook subscriptions, without their secrets. */
@@ -1453,11 +1481,27 @@ export class VerdifaxClient {
     return withList(out, "webhooks");
   }
 
-  /** Ends a webhook subscription. Its events stay in the pull feed. */
-  async deleteWebhook(id: number): Promise<WebhookDeletion> {
+  /** Ends a webhook subscription, with the owner key. Its events stay in
+   *  the pull feed. The client reads the subscription from
+   *  {@link listWebhooks} and signs `webhook.deleted` over its
+   *  {@link webhookValue} with the owner key's request key; the removal is
+   *  sealed in the account's feed, and the removed subscription is not sent
+   *  that event. Needs the `signingKey` option, and refuses to send without
+   *  it. Throws {@link VerdifaxError} when the account holds no live
+   *  subscription with this id, or the record returned does not seal what
+   *  was sent. */
+  async deleteWebhook(id: number, options: OwnerChangeOptions = {}): Promise<WebhookDeletion> {
     this.requireAPIKey();
     requirePositiveId(id, "id");
-    return this.request<WebhookDeletion>("DELETE", `${WEBHOOKS_PATH}/${id}`);
+    this.requireOwnerSigningKey("deleteWebhook");
+    const hook = (await this.listWebhooks()).webhooks.find((w) => w.id === id);
+    if (!hook) throw new VerdifaxError(`verdifax: the account holds no webhook ${id}`);
+    const value = webhookValue(hook.url, hook.types ?? []);
+    const signed = await this.ownerSigned("deleteWebhook", WEBHOOK_DELETED, value, options);
+    const out = await this.request<WebhookDeletion>("DELETE", `${WEBHOOKS_PATH}/${id}`, {
+      owner_signature: signed.owner_signature,
+    });
+    return checkWebhookChange(out, WEBHOOK_DELETED, value, signed);
   }
 
   /** A webhook's newest deliveries first, up to `limit` (1 to 500; the
@@ -2232,6 +2276,30 @@ interface SentOwnerSignature {
 
 /** True when a sealed owner signature is the one that was sent, under the
  *  client's own request key. */
+/** A webhook change's answer, checked: its record must seal the change, the
+ *  value, `decided_by` owner and the signature sent. */
+function checkWebhookChange<T extends { account_change?: AccountChange }>(
+  out: T,
+  action: string,
+  value: string,
+  signed: SentOwnerSignature,
+): T {
+  const change = out?.account_change;
+  if (
+    typeof change !== "object" ||
+    change === null ||
+    change.action !== action ||
+    change.value !== value ||
+    change.decided_by !== "owner" ||
+    !ownerSignatureMatchesSent(change.owner_signature, signed)
+  ) {
+    throw new VerdifaxError(
+      "verdifax: the webhook change the server returned does not seal the action, value, decided_by owner and owner_signature that were sent",
+    );
+  }
+  return out;
+}
+
 function ownerSignatureMatchesSent(
   sealed: OwnerSignature | undefined,
   sent: SentOwnerSignature,

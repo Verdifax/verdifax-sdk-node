@@ -16,6 +16,7 @@ import {
   ownerChangePreimage,
 } from "../dist/index.mjs";
 import { publicKeyObject, signedFields } from "./signed-body.mjs";
+import { webhookSealer } from "./webhook-server.mjs";
 
 // The round 60 vector (business-records/sdk-spec-round60.md), computed with
 // Go crypto/ed25519. Ed25519 is deterministic, so every SDK makes exactly
@@ -421,11 +422,12 @@ test("getAccount keeps the two settings", async () => {
 
 test("createWebhook takes account.changed and run.deleted, and names every kind in the server's order", async () => {
   const { seen, result } = await withServer(
-    () => ({ status: 201, json: { ok: true } }),
+    webhookSealer(SEED),
     async (c) => {
-      await c.createWebhook("https://hooks.example.com/v", { types: ["account.changed", "run.deleted"] });
-      return c.createWebhook("https://hooks.example.com/v", { types: ["account.change"] }).catch((err) => err);
+      await c.createWebhook("https://hooks.example.com/v", { types: ["account.changed", "run.deleted"], accountId: "account-7" });
+      return c.createWebhook("https://hooks.example.com/v", { types: ["account.change"], accountId: "account-7" }).catch((err) => err);
     },
+    { signingKey: SEED },
   );
   assert.deepEqual(seen[0].body.types, ["account.changed", "run.deleted"]);
   assert.equal(seen.length, 1);
