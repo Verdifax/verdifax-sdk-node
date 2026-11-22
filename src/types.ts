@@ -134,6 +134,30 @@ export interface PolicyContext {
    *  with the policy inputs, and a rule's data_quality condition can
    *  require and test it. Verdifax judges none of it. */
   data_quality?: DataQuality;
+  /** Your declaration of the data use the decision rests on, in your own
+   *  short codes (round 64): the purpose, the basis you declare, the
+   *  categories of data and an optional keyed reference. Verdifax seals the
+   *  declaration as made, in the policy inputs and in its own data_use field
+   *  of the run's record or receipt, and a rule's data_use condition can
+   *  test it. Verdifax does not check it. Checked before sending by
+   *  {@link validateDataUse}. Needs verdifax-verify v0.38.0 to read. */
+  data_use?: DataUse;
+}
+
+/** A request's declaration of the data use its decision rests on, in the
+ *  customer's own codes. Each code is a lowercase letter or digit, then up
+ *  to 63 lowercase letters, digits, dots, underscores, colons or hyphens. */
+export interface DataUse {
+  /** Your code for the purpose, such as `claims.review`. */
+  purpose: string;
+  /** Your code for the basis you declare, such as `contract`. */
+  basis: string;
+  /** Your codes for the categories of data, at most 20, each once. */
+  categories?: string[];
+  /** Optional: `hmac-sha256:` and 64 lowercase hex digits, a keyed digest
+   *  you computed on your own machine with {@link hmacSha256Reference}, so
+   *  the identifier itself is never sent. */
+  reference?: string;
 }
 
 /** A request's declaration about the data its decision used. */
@@ -921,7 +945,7 @@ export interface Account {
 }
 
 /** One of the owner's blocks on Verdifax, as its route names it. */
-export type AccountSetting = "owner-replacement" | "verdifax-deletion";
+export type AccountSetting = "owner-replacement" | "verdifax-deletion" | "verdifax-stop";
 
 /** A setting's value. */
 export type AccountSettingValue = "allowed" | "blocked";
@@ -1116,7 +1140,26 @@ export interface AccountKey {
   run_count: number;
   revoked: boolean;
   expires_at?: string;
+  /** A member key's tool allowlist, when its owner granted one (round 64). */
+  allowed_tools?: AllowedTool[];
 }
+
+/** A name a member key's tool allowlist may hold (round 64): a
+ *  verdifax-mcp tool, or `account_stop`, which lets the key place the
+ *  owner's stop and never lift one. Owner powers and approver keys can
+ *  never be granted. */
+export type AllowedTool =
+  | "verify_record"
+  | "verify_feed"
+  | "get_record"
+  | "list_records"
+  | "read_feed"
+  | "list_pending_signoffs"
+  | "get_signoffs"
+  | "test_policy"
+  | "seal_decision"
+  | "prepare_signoff"
+  | "account_stop";
 
 /** Returned by {@link VerdifaxClient.listAccountKeys}. */
 export interface AccountKeyList {
@@ -1145,6 +1188,11 @@ export interface AccountKeyRevocation {
 export interface CreateAccountKeyOptions {
   /** RFC 3339 or YYYY-MM-DD. */
   expiresAt?: string;
+  /** The tool allowlist to grant the new member key (round 64): one or
+   *  more distinct names. The server seals it, sorted, in the key's
+   *  key.created record, and then refuses the key on every route outside
+   *  the routes those tools call. Left out, the key is made as before. */
+  allowedTools?: AllowedTool[];
 }
 
 /** Options for {@link VerdifaxClient.adminCreateAccount}. */
@@ -1240,6 +1288,14 @@ export interface RunSealedRecord {
   sealed_at: string;
   /** The event's place in the account's signal feed. */
   signal: { signal_account: string; signal_sequence: number; signal_previous_hash: Hex64 };
+  /** The run's setup fingerprint (round 64), present only when the policy
+   *  in force watches the setup (watch_setup). A refused run's receipt
+   *  context carries the same field when the watch counts refused runs. */
+  setup_hash?: Hex64;
+  /** The response target the policy declares for this result (round 64),
+   *  present only when the rule's `signoff.within` asks for it to be sealed
+   *  in the result (`seal_in_result`) and the result requires a sign-off. */
+  signoff_target?: SealedTarget;
   run_sealed_hash: Hex64;
   /** The public-log anchor; absent while the entry is still being anchored. */
   anchor?: unknown;
@@ -1468,7 +1524,249 @@ export type SignalKind =
   | "account.changed"
   /** One of the account's records deleted, by the owner or by Verdifax: its
    *  entry is the {@link RunDeletion} tombstone. */
-  | "run.deleted";
+  | "run.deleted"
+  /** Round 64. The owner or Verdifax placed, or lifted, its own stop on the
+   *  account: the entry is an {@link AccountStopRecord}. */
+  | "account.stopped"
+  | "account.resumed"
+  /** A run's setup facts differ from the last ones the policy's setup
+   *  watch saw: the entry is a {@link SetupChangeRecord}. */
+  | "setup.changed"
+  /** The review date an activation's policy declares has passed while it
+   *  is in force: the entry is a {@link PolicyReviewDueRecord}. */
+  | "review.due"
+  /** A response target the policy declares passed with no sign-off of the
+   *  kind it compares. */
+  | "signoff.target_passed"
+  /** A sign-off refused because a stop whose scope refuses sign-offs
+   *  stood: the entry is a {@link SignOffRefusalRecord}. It is not a
+   *  sign-off, and {@link pendingSignOffs} never counts it as one. */
+  | "signoff.refused";
+
+/** The feed place a round 64 record seals. */
+export interface SignalPlace {
+  signal_account: string;
+  signal_sequence: number;
+  signal_previous_hash: Hex64;
+}
+
+/** A setup change, verdifax.setup-change.v1: the entry of a `setup.changed`
+ *  event (round 64). It states what the request declared
+ *  (`declared_by_caller`) and what Verdifax's AI review stated about itself
+ *  (`attested_by_verdifax`), each as stated; it never says which model ran.
+ *  `verdifax-verify` reads it from v0.38.0. Save it as the server sent it. */
+export interface SetupChangeRecord {
+  format: "verdifax.setup-change.v1";
+  run_id: number;
+  /** `record` for an allowed run, or the stopped run's receipt kind. */
+  record_kind: string;
+  record_hash: Hex64;
+  /** `account`, or `key-N` for one key. */
+  scope: string;
+  activation_hash: Hex64;
+  fields: string[];
+  /** Empty for the first setup the watch saw in its scope. */
+  previous_setup_hash: string;
+  setup_hash: Hex64;
+  setup: {
+    declared_by_caller?: {
+      model_provider?: string;
+      model_name?: string;
+      model_version?: string;
+      model_temperature?: string;
+      prompt_hash?: string;
+      client_name?: string;
+      client_version?: string;
+    };
+    attested_by_verdifax?: {
+      review_model?: string;
+      review_prompt_id?: string;
+      review_checker_id?: string;
+    };
+  };
+  changed_at: string;
+  signal: SignalPlace;
+  setup_change_hash: Hex64;
+  anchor?: Record<string, unknown>;
+}
+
+/** A policy review date passed, verdifax.policy-review-due.v1: the entry
+ *  of a `review.due` event (round 64), sealed once per activation when the
+ *  review date its policy declares passes while it is still in force. */
+export interface PolicyReviewDueRecord {
+  format: "verdifax.policy-review-due.v1";
+  /** `api-key-N` or `account-N`. */
+  chain_id: string;
+  activation_sequence: number;
+  activation_hash: Hex64;
+  document_hash: Hex64;
+  activated_at: string;
+  review_by?: string;
+  interval_days?: number;
+  due_at: string;
+  statement: string;
+  stated_at: string;
+  signal: SignalPlace;
+  review_due_hash: Hex64;
+  anchor?: Record<string, unknown>;
+}
+
+/** A stop's scope: what it leaves working. */
+export interface StopScope {
+  /** Sign-offs on results already sealed: accepted (the default) or
+   *  refused while the stop stands. */
+  signoffs: "accept" | "refuse";
+  /** Webhook deliveries: they continue (the default) or wait until the
+   *  stop is lifted. */
+  webhooks: "continue" | "pause";
+}
+
+/** An account stop placed or lifted, verdifax.account-stop.v1: the entry
+ *  of an `account.stopped` or `account.resumed` event (round 64). The
+ *  owner and Verdifax each hold a stop of their own and lift only their
+ *  own. The record states who stopped or resumed the account, when, with
+ *  what scope and how many runs were already in progress; a stop touches
+ *  no key. */
+export interface AccountStopRecord {
+  format: "verdifax.account-stop.v1";
+  action: "stop" | "resume";
+  decided_by: "owner" | "verdifax_admin";
+  /** The account key that asked; absent for Verdifax. */
+  key_id?: number;
+  /** A stop's scope; a resume carries none. */
+  scope?: StopScope;
+  /** SHA-256 of the reason text sent; the text is not kept. */
+  reason_sha256?: string;
+  runs_in_progress: number;
+  /** On a resume, the feed place of the stop it lifts. */
+  lifts_sequence?: number;
+  /** The owner's request-key signature: on every owner resume, and on an
+   *  owner stop when one came. */
+  owner_signature?: OwnerSignature;
+  /** On an owner stop sent without a signature, the fixed statement that
+   *  the record is the server's word. */
+  unsigned?: string;
+  changed_at: string;
+  signal: SignalPlace;
+  account_stop_hash: Hex64;
+  anchor?: Record<string, unknown>;
+}
+
+/** A sign-off refused during a stop, verdifax.signoff-refusal.v1: the
+ *  entry of a `signoff.refused` event (round 64). It keeps the attempt
+ *  exactly as the approver signed it. It is not a sign-off. */
+export interface SignOffRefusalRecord {
+  format: "verdifax.signoff-refusal.v1";
+  chain_id: string;
+  previous_signoff_hash: Hex64;
+  target: SignOffTarget;
+  decision: SignOffDecision;
+  note_hash?: string;
+  approver_key: string;
+  approver_id: number;
+  signature: string;
+  signed_at: string;
+  nonce: string;
+  /** The feed place of the stop that refused it. */
+  stop_sequence: number;
+  reason_code: "ACCOUNT_STOPPED";
+  refused_at: string;
+  signal: SignalPlace;
+  signoff_refusal_hash: Hex64;
+  anchor?: Record<string, unknown>;
+}
+
+/** One stop standing on an account, as GET /account/stop shows it. */
+export interface StopHold {
+  holder: "owner" | "verdifax";
+  /** The feed place of the stop's `account.stopped` event. */
+  stop_sequence: number;
+  stopped_at: string;
+  scope: StopScope;
+}
+
+/** Returned by {@link VerdifaxClient.getAccountStop}. */
+export interface AccountStopState {
+  ok: boolean;
+  account_id: string;
+  /** True while any stop stands: the account runs only when neither the
+   *  owner's nor Verdifax's stands. */
+  stopped: boolean;
+  holds: StopHold[];
+  /** The owner's setting for Verdifax's own stop. */
+  verdifax_stop: AccountSettingValue;
+  runs_in_progress: number;
+}
+
+/** Returned by the stop and resume methods: the record sealed and the
+ *  stops now standing. */
+export interface AccountStopResult {
+  ok: boolean;
+  account_id: string;
+  stopped: boolean;
+  holds: StopHold[];
+  account_stop: AccountStopRecord;
+}
+
+/** Options for {@link VerdifaxClient.stopAccount}. */
+export interface StopAccountOptions {
+  /** `accept` (the default) or `refuse` sign-offs while the stop stands. */
+  signoffs?: "accept" | "refuse";
+  /** `continue` (the default) or `pause` webhook deliveries. */
+  webhooks?: "continue" | "pause";
+  /** Optional text of at most 1000 bytes; only its SHA-256 is sealed. */
+  reason?: string;
+  /** Send the stop with no request-key signature. The record then seals
+   *  the server's word that this key asked. A member key its owner granted
+   *  `account_stop` sends only an unsigned stop. */
+  unsigned?: boolean;
+  /** The owner key's id, which the signature names. Left out, it is read
+   *  from GET /account/keys: the one owner key not revoked. */
+  keyId?: number;
+  /** The account's label, `account-N`. Left out, it is read from GET
+   *  /account. */
+  accountId?: string;
+}
+
+/** Options for {@link VerdifaxClient.resumeAccount}. */
+export interface ResumeAccountOptions {
+  /** The feed place of the owner's stop to lift. Left out, it is read from
+   *  GET /account/stop. */
+  liftsSequence?: number;
+  /** Optional text of at most 1000 bytes; only its SHA-256 is sealed. */
+  reason?: string;
+  /** The owner key's id; as for {@link StopAccountOptions}. */
+  keyId?: number;
+  /** The account's label; as for {@link StopAccountOptions}. */
+  accountId?: string;
+}
+
+/** Options for {@link VerdifaxClient.adminStopAccount}. */
+export interface AdminStopAccountOptions {
+  signoffs?: "accept" | "refuse";
+  webhooks?: "continue" | "pause";
+  reason?: string;
+}
+
+/** Options for {@link VerdifaxClient.adminResumeAccount}. */
+export interface AdminResumeAccountOptions {
+  /** The feed place of Verdifax's stop. Left out, the server lifts the one
+   *  that stands. */
+  liftsSequence?: number;
+  reason?: string;
+}
+
+/** The fields {@link accountStopSubject} reads. */
+export interface AccountStopSubjectFields {
+  action: "stop" | "resume";
+  /** The owner key's id. */
+  keyId: number;
+  signoffs?: "accept" | "refuse";
+  webhooks?: "continue" | "pause";
+  /** A resume's stop, by its feed place. */
+  liftsSequence?: number;
+  reason?: string;
+}
 
 /** The Verdifax event inside a {@link SignalEvent}, verdifax.signal.v1. */
 export interface SignalEventData {
@@ -1744,4 +2042,222 @@ export interface AivpFinding {
   node_b: string;
   term: string;
   opposite: string;
+}
+
+// ── Board summary, response times and the rule in force (round 64) ──
+
+/** A response target as a record seals it (round 64): `within` seconds,
+ *  the end point it is compared with (`first_signoff`, `first_approval` or
+ *  `decision_in_force`) and how its passing is stated (`event`, `head` or
+ *  `both`). A run.sealed entry carries it as `signoff_target`, and a
+ *  refused run's receipt context as `response_target`, only when the
+ *  customer's policy asks for it. It is the customer's own target, never
+ *  Verdifax's judgement. */
+export interface SealedTarget {
+  within: number;
+  compare: "first_signoff" | "first_approval" | "decision_in_force";
+  notice: "event" | "head" | "both";
+}
+
+/** One figure of a period summary: its name, its value and the digest of
+ *  the exact list of feed events it counts. */
+export interface SummaryFigure {
+  name: string;
+  value: number;
+  events_digest: Hex64;
+}
+
+/** A period summary, verdifax.period-summary.v1 (round 64): Verdifax's
+ *  statement of the figures the counting rules give over the account's
+ *  feed for a period, up to a feed head on the public log, anchored as its
+ *  own public-log entry. The SDK returns it as sealed and never recounts
+ *  it; `verdifax-verify` recounts it from the feed. Like every object read
+ *  from the server, it keeps its exact text in `sealedJson`. */
+export interface PeriodSummary {
+  format: "verdifax.period-summary.v1";
+  account: string;
+  from: string;
+  to: string;
+  counting_rules: string;
+  head_sequence: number;
+  head_hash: Hex64;
+  head_statement_hash: Hex64;
+  figures: SummaryFigure[];
+  stated_at: string;
+  summary_hash: Hex64;
+  anchor?: unknown;
+}
+
+/** The answer of {@link VerdifaxClient.createSummary}: the summary's id,
+ *  whether it was already sealed for this period over this feed (`reused`,
+ *  HTTP 200) or sealed now (HTTP 201), and the summary as sealed. */
+export interface SummaryAnswer {
+  id: number;
+  reused: boolean;
+  summary: PeriodSummary;
+  /** The feed-head statement the summary counted up to, as put on the
+   *  public log; save it beside the summary for `--summary-head`. */
+  head?: FeedHead;
+}
+
+/** One row of {@link VerdifaxClient.listSummaries}. */
+export interface SummaryListItem {
+  id: number;
+  from: string;
+  to: string;
+  head_sequence: number;
+  stated_at: string;
+  summary_hash: Hex64;
+  on_public_log: boolean;
+  log_entry_id?: string;
+}
+
+/** The answer of {@link VerdifaxClient.listSummaries}, newest first. */
+export interface SummaryList {
+  summaries: SummaryListItem[];
+  limit: number;
+}
+
+/** Options for {@link VerdifaxClient.getResponseTimes}. */
+export interface ResponseTimesOptions {
+  /** A target in whole seconds, 1 to 31622400, for each result that seals
+   *  none, compared with its first sign-off. */
+  target?: number;
+  /** Include the feed the report was counted from, so it can be checked
+   *  offline. */
+  pack?: boolean;
+}
+
+/** The target a result is measured against in the report. `source` is
+ *  `sealed` (the policy's, sealed in the result) or `request` (the one the
+ *  request gave). */
+export interface ResultTarget {
+  within: number;
+  compare: string;
+  notice?: string;
+  source: "sealed" | "request";
+}
+
+/** One end point of a result's wait: the sign-off event, its decision, its
+ *  sealed time and public-log time, and the waits to it on each clock. */
+export interface ResponseEndPoint {
+  sequence: number;
+  decision: string;
+  recorded_at: string;
+  logged_at?: string;
+  log_seconds?: number;
+  record_seconds: number;
+}
+
+/** One result of the period and its waits. `standing` states the measured
+ *  wait against the target, as measured. */
+export interface ResultTime {
+  run_id: number;
+  result_kind: "record" | "receipt";
+  event_kind: string;
+  sequence: number;
+  recorded_at: string;
+  logged_at?: string;
+  signoff_required?: boolean;
+  target?: ResultTarget;
+  first_signoff?: ResponseEndPoint;
+  first_approval?: ResponseEndPoint;
+  decision_in_force?: ResponseEndPoint;
+  compared: string;
+  compared_on: "public_log" | "record_time";
+  compared_seconds: number;
+  standing: string;
+}
+
+/** One end point's waits on one clock: how many, the median, the 90th
+ *  percentile by nearest rank, and the longest with its run. */
+export interface ResponseSpread {
+  count: number;
+  median_seconds: number;
+  p90_seconds: number;
+  longest_seconds: number;
+  longest_run_id: number;
+}
+
+/** One end point's figures: how many results reached it, and its waits on
+ *  the public log and on the sealed record times. */
+export interface ResponseEndAggregate {
+  reached: number;
+  public_log?: ResponseSpread;
+  record_time?: ResponseSpread;
+}
+
+/** The report's figures. */
+export interface ResponseAggregates {
+  results: number;
+  results_deleted: number;
+  with_target: number;
+  first_signoff: ResponseEndAggregate;
+  first_approval: ResponseEndAggregate;
+  decision_in_force: ResponseEndAggregate;
+  unsigned_as_of_head: number;
+  longer_than_target_signed_after: number;
+  longer_than_target_unsigned_as_of_head: number;
+}
+
+/** The response-time report, verdifax.response-times.v1 (round 64):
+ *  computed by the server from the account's feed alone up to a feed head
+ *  on the public log, public-log times first with the sealed record times
+ *  beside. It is not sealed; `verdifax-verify` recounts it from the feed,
+ *  which `pack` includes. */
+export interface ResponseTimesReport {
+  form: "verdifax.response-times.v1";
+  account: string;
+  from: string;
+  to: string;
+  counting_rules: string;
+  request_target?: number;
+  head_sequence: number;
+  head: FeedHead | null;
+  results: ResultTime[];
+  aggregates: ResponseAggregates;
+  /** With `pack`, the feed's events as served. */
+  feed?: SignalEvent[];
+}
+
+/** verdifax.signoff-target-passed.v1 (round 64), the entry of a
+ *  `signoff.target_passed` event: the response target the customer's
+ *  policy declares for a result passed with no sign-off of the kind it
+ *  compares on the public log by the deadline. It states that fact, never
+ *  that anything was late. */
+export interface SignOffTargetPassedRecord {
+  format: "verdifax.signoff-target-passed.v1";
+  result_kind: "record" | "receipt";
+  run_id: number;
+  result_sequence: number;
+  result_hash: Hex64;
+  source: "signoff.within" | "response_targets.refusals" | "response_targets.stops";
+  within: number;
+  compare: string;
+  notice: string;
+  start_basis: "public_log" | "record_time";
+  start: string;
+  deadline: string;
+  statement: string;
+  stated_at: string;
+  signal: { signal_account: string; signal_sequence: number; signal_previous_hash: Hex64 };
+  target_passed_hash: Hex64;
+  anchor?: unknown;
+}
+
+/** One decision and the policy change it was made under, from
+ *  {@link ruleInForce}. `policy` is `account`, `key`, or empty when nothing
+ *  says which; `found_by` is `record`, `receipt_context`, `receipt` or
+ *  `policy_history`; `sequence`, `chain_id` and `activated_at` come from the
+ *  policy history when it holds the change, and are null otherwise. */
+export interface RuleInForceDecision {
+  policy: "account" | "key" | "";
+  activation_hash: Hex64;
+  policy_hash: Hex64;
+  fired_rule_id: string;
+  outcome: string;
+  found_by: "record" | "receipt_context" | "receipt" | "policy_history";
+  sequence: number | null;
+  chain_id: string | null;
+  activated_at: string | null;
 }

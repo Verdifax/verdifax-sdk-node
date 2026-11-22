@@ -102,6 +102,40 @@
         "verdifax_admin_replace_owner_key"
       ]
     },
+    "POST /admin/accounts/{id}/resume": {
+      "go": [
+        "AdminResumeAccount"
+      ],
+      "node": [
+        "adminResumeAccount"
+      ],
+      "python": [
+        "admin_resume_account"
+      ],
+      "python_async": [
+        "admin_resume_account"
+      ],
+      "r": [
+        "verdifax_admin_resume_account"
+      ]
+    },
+    "POST /admin/accounts/{id}/stop": {
+      "go": [
+        "AdminStopAccount"
+      ],
+      "node": [
+        "adminStopAccount"
+      ],
+      "python": [
+        "admin_stop_account"
+      ],
+      "python_async": [
+        "admin_stop_account"
+      ],
+      "r": [
+        "verdifax_admin_stop_account"
+      ]
+    },
     "POST /admin/erase": {
       "go": [
         "AdminErase"
@@ -347,13 +381,40 @@
       "node": "webhookValue",
       "python": "webhook_value",
       "r": "verdifax_webhook_value"
+    },
+    "account_stop_subject": {
+      "go": "AccountStopSubject",
+      "node": "accountStopSubject",
+      "python": "account_stop_subject",
+      "r": "verdifax_account_stop_subject"
+    },
+    "hmac_sha256_reference": {
+      "go": "HMACSHA256Reference",
+      "node": "hmacSha256Reference",
+      "python": "hmac_sha256_reference",
+      "r": "verdifax_hmac_sha256_reference"
+    },
+    "validate_data_use": {
+      "go": "ValidateDataUse",
+      "node": "validateDataUse",
+      "python": "validate_data_use",
+      "r": "verdifax_validate_data_use"
+    },
+    "rule_in_force": {
+      "go": "RuleInForce",
+      "node": "ruleInForce",
+      "python": "rule_in_force",
+      "r": "verdifax_rule_in_force"
     }
   },
   "notes": {
     "go_provider_govern": "Go passes the option verdifax.WithGovern(); Node passes govern: true; Python govern=True; R govern = TRUE.",
     "python_async": "Every python method above also exists on AsyncVerdifaxClient as a coroutine.",
     "account_routes": "Methods that serve both a member route and an /account route take an option to use the owner key's route: Go AsOwner, Node asOwner, Python as_owner, R as_owner.",
-    "signal_feed": "GET /signals takes a feed key; GET /account/signals is the same method with the owner option. The feed is read with after (the last sequence read), limit (1 to 500) and wait (0 to 25 seconds); the HTTP timeout exceeds the wait. follow_signals reads page after page from a place, waiting between, until the caller stops it. verify_webhook checks a delivery under the Standard Webhooks scheme: whsec_ secret, webhook-id, webhook-timestamp within a tolerance (default 300 seconds), and any v1 signature in webhook-signature, compared in constant time; it returns the CloudEvent."
+    "signal_feed": "GET /signals takes a feed key; GET /account/signals is the same method with the owner option. The feed is read with after (the last sequence read), limit (1 to 500) and wait (0 to 25 seconds); the HTTP timeout exceeds the wait. follow_signals reads page after page from a place, waiting between, until the caller stops it. verify_webhook checks a delivery under the Standard Webhooks scheme: whsec_ secret, webhook-id, webhook-timestamp within a tolerance (default 300 seconds), and any v1 signature in webhook-signature, compared in constant time; it returns the CloudEvent.",
+    "account_stop": "The owner's stop (POST /account/stop) is signed by the owner key's request key unless the caller asks for an unsigned stop, which the record seals as the server's word; a member key its owner granted account_stop sends only an unsigned stop. A resume is always signed and names the stop it lifts (lifts_sequence, read from GET /account/stop when not given). The signed subject is account_stop_subject's (scripts/sdk-account-stop-vector.json). A sign-off refused during a stop whose scope refuses sign-offs is raised as the SDK's sign-off refusal error carrying the sealed verdifax.signoff-refusal.v1 record.",
+    "data_use": "policy_context.data_use is checked by validate_data_use before sending; hmac_sha256_reference computes its optional reference on the caller's machine, so the identifier itself is never sent (scripts/sdk-data-use-vector.json).",
+    "board_summary": "The board summary and response-time routes are fetched and returned as the server sent them, typed: verdifax.period-summary.v1, verdifax.response-times.v1 (with pack the feed it was counted from), and the PDF's bytes. The SDKs never recount them; verdifax-verify does (scripts/sdk-board-summary-vector.json). rule_in_force reads the change a record or receipt was decided under, and needs the policy history only for a refusal for missing fields that names none (scripts/sdk-rule-in-force-vector.json)."
   },
   "options": {
     "provider_govern": {
@@ -693,6 +754,108 @@
       ],
       "r": [
         "verdifax_get_newest_signoff"
+      ]
+    },
+    "GET /account/signoffs/response-times": {
+      "go": [
+        "GetResponseTimes"
+      ],
+      "node": [
+        "getResponseTimes"
+      ],
+      "python": [
+        "get_response_times"
+      ],
+      "python_async": [
+        "get_response_times"
+      ],
+      "r": [
+        "verdifax_get_response_times"
+      ]
+    },
+    "GET /account/stop": {
+      "go": [
+        "GetAccountStop"
+      ],
+      "node": [
+        "getAccountStop"
+      ],
+      "python": [
+        "get_account_stop"
+      ],
+      "python_async": [
+        "get_account_stop"
+      ],
+      "r": [
+        "verdifax_get_account_stop"
+      ]
+    },
+    "GET /account/summaries": {
+      "go": [
+        "ListSummaries"
+      ],
+      "node": [
+        "listSummaries"
+      ],
+      "python": [
+        "list_summaries"
+      ],
+      "python_async": [
+        "list_summaries"
+      ],
+      "r": [
+        "verdifax_list_summaries"
+      ]
+    },
+    "GET /account/summaries/{id}": {
+      "go": [
+        "GetSummary"
+      ],
+      "node": [
+        "getSummary"
+      ],
+      "python": [
+        "get_summary"
+      ],
+      "python_async": [
+        "get_summary"
+      ],
+      "r": [
+        "verdifax_get_summary"
+      ]
+    },
+    "GET /account/summaries/{id}/head": {
+      "go": [
+        "GetSummaryHead"
+      ],
+      "node": [
+        "getSummaryHead"
+      ],
+      "python": [
+        "get_summary_head"
+      ],
+      "python_async": [
+        "get_summary_head"
+      ],
+      "r": [
+        "verdifax_get_summary_head"
+      ]
+    },
+    "GET /account/summaries/{id}/report.pdf": {
+      "go": [
+        "DownloadSummaryReport"
+      ],
+      "node": [
+        "downloadSummaryReport"
+      ],
+      "python": [
+        "download_summary_report"
+      ],
+      "python_async": [
+        "download_summary_report"
+      ],
+      "r": [
+        "verdifax_download_summary_report"
       ]
     },
     "GET /account/webhooks": {
@@ -1299,19 +1462,24 @@
     },
     "GET /stats": {
       "go": [
-        "GetStats"
+        "GetStats",
+        "GetAllowedTools"
       ],
       "node": [
-        "getStats"
+        "getStats",
+        "getAllowedTools"
       ],
       "python": [
-        "get_stats"
+        "get_stats",
+        "get_allowed_tools"
       ],
       "python_async": [
-        "get_stats"
+        "get_stats",
+        "get_allowed_tools"
       ],
       "r": [
-        "verdifax_get_stats"
+        "verdifax_get_stats",
+        "verdifax_get_allowed_tools"
       ]
     },
     "GET /version": {
@@ -1450,6 +1618,23 @@
         "verdifax_register_account_request_key"
       ]
     },
+    "POST /account/resume": {
+      "go": [
+        "ResumeAccount"
+      ],
+      "node": [
+        "resumeAccount"
+      ],
+      "python": [
+        "resume_account"
+      ],
+      "python_async": [
+        "resume_account"
+      ],
+      "r": [
+        "verdifax_resume_account"
+      ]
+    },
     "POST /account/runs/{id}/delete": {
       "go": [
         "DeleteRun"
@@ -1516,6 +1701,40 @@
       ],
       "r": [
         "verdifax_sign_off"
+      ]
+    },
+    "POST /account/stop": {
+      "go": [
+        "StopAccount"
+      ],
+      "node": [
+        "stopAccount"
+      ],
+      "python": [
+        "stop_account"
+      ],
+      "python_async": [
+        "stop_account"
+      ],
+      "r": [
+        "verdifax_stop_account"
+      ]
+    },
+    "POST /account/summaries": {
+      "go": [
+        "CreateSummary"
+      ],
+      "node": [
+        "createSummary"
+      ],
+      "python": [
+        "create_summary"
+      ],
+      "python_async": [
+        "create_summary"
+      ],
+      "r": [
+        "verdifax_create_summary"
       ]
     },
     "POST /account/webhooks": {

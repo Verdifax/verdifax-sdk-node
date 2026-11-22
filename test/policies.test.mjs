@@ -528,6 +528,8 @@ const ATTESTED_KEYS = [
   "decision_kind",
   "decision_result",
   "decision_note",
+  "client_name",
+  "client_version",
 ];
 
 async function refusedOnEveryRunPath(fields, message) {

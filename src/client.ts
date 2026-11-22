@@ -3,8 +3,18 @@ import {
   APIKeyRequiredError,
   AuthError,
   NotFoundError,
+  SignOffRefusedError,
   VerdifaxError,
 } from "./errors.js";
+import {
+  ACCOUNT_RESUMED_CHANGE,
+  ACCOUNT_STOPPED_CHANGE,
+  accountStopSubject,
+  allowedToolsFromHeader,
+  checkedAllowedTools,
+  stopReasonHash,
+  stopScopeOf,
+} from "./account-stop.js";
 import {
   approverKeyProof,
   approverKeyProofVerifies,
@@ -42,7 +52,22 @@ import {
   WEBHOOKS_PATH,
 } from "./signals.js";
 import type {
+  FeedHead,
+  PeriodSummary,
+  ResponseTimesOptions,
+  ResponseTimesReport,
+  SummaryAnswer,
+  SummaryList,
   AccountChange,
+  AccountStopRecord,
+  AccountStopResult,
+  AccountStopState,
+  AdminResumeAccountOptions,
+  AdminStopAccountOptions,
+  ResumeAccountOptions,
+  SignOffRefusalRecord,
+  StopAccountOptions,
+  StopScope,
   Account,
   AccountInfo,
   AccountSetting,
@@ -163,6 +188,8 @@ const ACCOUNT_CHAIN_ID = /^account-[1-9][0-9]*$/;
 const ACCOUNT_SETTING_CHANGES: Record<AccountSetting, string> = {
   "owner-replacement": "setting.owner_replacement",
   "verdifax-deletion": "setting.verdifax_deletion",
+  // Round 64: the owner's setting that allows or blocks Verdifax's stop.
+  "verdifax-stop": "setting.verdifax_stop",
 };
 const ACCOUNT_SETTING_VALUES = new Set(["allowed", "blocked"]);
 const RUN_DELETED_CHANGE = "run.deleted";
@@ -378,6 +405,15 @@ export class VerdifaxClient {
   async getStats(): Promise<RunStats> {
     this.requireAPIKey();
     return this.request<RunStats>("GET", "/stats");
+  }
+
+  /** The tool allowlist this key's owner granted it (round 64), from the
+   *  X-Verdifax-Allowed-Tools header of GET /stats: the names, or null when
+   *  the key has no allowlist and is admitted by its scope alone. */
+  async getAllowedTools(): Promise<string[] | null> {
+    this.requireAPIKey();
+    const raw = await this.requestRaw("/stats");
+    return allowedToolsFromHeader(raw.headers.get("X-Verdifax-Allowed-Tools"));
   }
 
   // ── Execute / Attest (auth) ───────────────────────────────────
@@ -809,13 +845,26 @@ export class VerdifaxClient {
         "verdifax: name is required for createAccountKey",
       );
     }
-    const body: { name: string; expires_at?: string } = { name };
+    const body: { name: string; expires_at?: string; allowed_tools?: string[] } = { name };
     if (options.expiresAt !== undefined) body.expires_at = options.expiresAt;
-    return this.request<CreatedAccountKey>(
+    if (options.allowedTools !== undefined) {
+      body.allowed_tools = checkedAllowedTools(options.allowedTools);
+    }
+    const out = await this.request<CreatedAccountKey>(
       "POST",
       `${ACCOUNT_PATH}/keys`,
       body,
     );
+    if (body.allowed_tools !== undefined) {
+      const want = [...body.allowed_tools].sort();
+      const got = out?.allowed_tools;
+      if (!Array.isArray(got) || got.length !== want.length || got.some((name, i) => name !== want[i])) {
+        throw new VerdifaxError(
+          "verdifax: the key the server made does not carry the tool allowlist that was sent",
+        );
+      }
+    }
+    return out;
   }
 
   /** Every key in the account, owner keys included, without secrets. */
@@ -990,7 +1039,7 @@ export class VerdifaxClient {
     this.requireAPIKey();
     if (!Object.hasOwn(ACCOUNT_SETTING_CHANGES, setting)) {
       throw new VerdifaxError(
-        "verdifax: setAccountSetting setting must be owner-replacement or verdifax-deletion",
+        "verdifax: setAccountSetting setting must be owner-replacement, verdifax-deletion or verdifax-stop",
       );
     }
     if (!ACCOUNT_SETTING_VALUES.has(value)) {
@@ -1111,6 +1160,271 @@ export class VerdifaxClient {
       owner_signature: ownerChangeSignature(signingKey, { account, change, subject }),
       public_key: publicKeyOf(signingKey),
     };
+  }
+
+  // ── Account stop (round 64) ──────────────────────────────────
+  //
+  // The owner and Verdifax each hold a stop of their own on the account
+  // and lift only their own; the account runs only while neither stands.
+  // While a stop stands every new run is refused with a sealed deny
+  // receipt, runs already in progress finish, and no key is revoked or
+  // changed. Each stop and lift is sealed in the account's feed.
+
+  /** Places the owner's stop with POST /account/stop. By default the owner
+   *  key's request key, this client's `signingKey`, signs it, naming the
+   *  owner key's id (`keyId`, or the one owner key not revoked in GET
+   *  /account/keys) and the account's label (`accountId`, or GET
+   *  /account's). With `unsigned: true` no signature is sent and nothing is
+   *  read first; the record then seals the server's word that this key
+   *  asked. A member key its owner granted `account_stop` stops only that
+   *  way. The record the server returns must seal the action, scope,
+   *  reason hash and, for a signed stop, the key and signature sent, or
+   *  this throws {@link VerdifaxError}. Bad input is refused before
+   *  anything is sent. */
+  async stopAccount(options: StopAccountOptions = {}): Promise<AccountStopResult> {
+    this.requireAPIKey();
+    const scope = stopScopeOf(options.signoffs, options.webhooks);
+    const reasonHash = stopReasonHash(options.reason);
+    if (options.unsigned !== undefined && typeof options.unsigned !== "boolean") {
+      throw new VerdifaxError("verdifax: stopAccount unsigned must be true or false");
+    }
+    const body: Record<string, unknown> = { signoffs: scope.signoffs, webhooks: scope.webhooks };
+    if (reasonHash) body.reason = options.reason;
+    if (options.unsigned === true) {
+      const out = await this.request<AccountStopResult>("POST", `${ACCOUNT_PATH}/stop`, body);
+      const record = checkedStopRecord(out, "stop", "owner", scope, reasonHash);
+      if (record.owner_signature !== undefined || typeof record.unsigned !== "string" || record.unsigned === "") {
+        throw new VerdifaxError(
+          "verdifax: the unsigned stop the server returned does not seal the unsigned statement",
+        );
+      }
+      return out;
+    }
+    this.requireOwnerSigningKey("stopAccount (or pass unsigned: true for an unsigned stop)");
+    const keyId = await this.ownerKeyId(options.keyId, "stopAccount");
+    const subject = accountStopSubject({
+      action: "stop",
+      keyId,
+      signoffs: scope.signoffs,
+      webhooks: scope.webhooks,
+      reason: options.reason,
+    });
+    const signed = await this.ownerSigned("stopAccount", ACCOUNT_STOPPED_CHANGE, subject, options);
+    body.owner_signature = signed.owner_signature;
+    const out = await this.request<AccountStopResult>("POST", `${ACCOUNT_PATH}/stop`, body);
+    const record = checkedStopRecord(out, "stop", "owner", scope, reasonHash);
+    if (record.key_id !== keyId || !ownerSignatureMatchesSent(record.owner_signature, signed)) {
+      throw new VerdifaxError(
+        "verdifax: the stop the server returned does not seal the key_id and owner_signature that were sent",
+      );
+    }
+    return out;
+  }
+
+  /** Lifts the owner's stop with POST /account/resume, always signed by
+   *  the owner key's request key. `liftsSequence` names the stop by its
+   *  feed place; left out, it is read from GET /account/stop. It never
+   *  lifts Verdifax's stop. The record returned must seal what was sent,
+   *  or this throws {@link VerdifaxError}. */
+  async resumeAccount(options: ResumeAccountOptions = {}): Promise<AccountStopResult> {
+    this.requireAPIKey();
+    this.requireOwnerSigningKey("resumeAccount");
+    const reasonHash = stopReasonHash(options.reason);
+    let lifts = options.liftsSequence;
+    if (lifts !== undefined) requirePositiveId(lifts, "liftsSequence");
+    const keyId = await this.ownerKeyId(options.keyId, "resumeAccount");
+    if (lifts === undefined) {
+      const state = await this.getAccountStop();
+      const hold = (Array.isArray(state?.holds) ? state.holds : []).find((h) => h?.holder === "owner");
+      if (hold === undefined || !Number.isSafeInteger(hold.stop_sequence) || hold.stop_sequence <= 0) {
+        throw new VerdifaxError("verdifax: no owner stop stands on this account, so there is none to lift");
+      }
+      lifts = hold.stop_sequence;
+    }
+    const subject = accountStopSubject({ action: "resume", keyId, liftsSequence: lifts, reason: options.reason });
+    const signed = await this.ownerSigned("resumeAccount", ACCOUNT_RESUMED_CHANGE, subject, options);
+    const body: Record<string, unknown> = { lifts_sequence: lifts };
+    if (reasonHash) body.reason = options.reason;
+    body.owner_signature = signed.owner_signature;
+    const out = await this.request<AccountStopResult>("POST", `${ACCOUNT_PATH}/resume`, body);
+    const record = checkedStopRecord(out, "resume", "owner", undefined, reasonHash);
+    if (
+      record.lifts_sequence !== lifts ||
+      record.key_id !== keyId ||
+      !ownerSignatureMatchesSent(record.owner_signature, signed)
+    ) {
+      throw new VerdifaxError(
+        "verdifax: the resume the server returned does not seal the lifts_sequence, key_id and owner_signature that were sent",
+      );
+    }
+    return out;
+  }
+
+  /** The account's stops, from GET /account/stop with the owner key: each
+   *  stop standing, the owner's verdifax-stop setting and the runs in
+   *  progress. Reading changes nothing. */
+  async getAccountStop(): Promise<AccountStopState> {
+    this.requireAPIKey();
+    const out = await this.request<AccountStopState>("GET", `${ACCOUNT_PATH}/stop`);
+    return withList(out, "holds");
+  }
+
+  // ── Board summary and response times (round 64) ──────────────
+  //
+  // The SDK fetches these documents and returns them as the server sent
+  // them. It never recounts a figure: verdifax-verify recounts each one
+  // from the account's feed.
+
+  /** Seals a period summary for a board with POST /account/summaries
+   *  (owner key): the figures the counting rules give over the account's
+   *  feed from `from` to `to` (RFC 3339 times), up to a feed head on the
+   *  public log, stated by Verdifax and anchored as its own public-log
+   *  entry. The answer is `{id, reused, summary}`: `reused` is true (HTTP
+   *  200) when that period was already sealed over the same feed, and false
+   *  (HTTP 201) when it was sealed now. The summary keeps its exact text in
+   *  `sealedJson`; save it and check it with `verdifax-verify`, which
+   *  recounts every figure. It counts what the feed shows and judges none
+   *  of it. Throws {@link VerdifaxError} for an answer that is not a sealed
+   *  summary. */
+  async createSummary(from: string, to: string): Promise<SummaryAnswer> {
+    this.requireAPIKey();
+    requireText(from, "from");
+    requireText(to, "to");
+    const out = await this.request<SummaryAnswer>("POST", `${ACCOUNT_PATH}/summaries`, { from, to });
+    if (!Number.isSafeInteger(out?.id) || out.id <= 0 || typeof out.reused !== "boolean") {
+      throw new VerdifaxError("verdifax: the server's summary answer has no id or no reused flag");
+    }
+    checkSummary(out.summary);
+    if (out.head !== undefined && out.head !== null) checkSummaryHead(out.head, out.summary, "POST /account/summaries");
+    return out;
+  }
+
+  /** The account's period summaries, newest first, from GET
+   *  /account/summaries (owner key). `limit` is a whole number of 1 or more;
+   *  the server lists at most 200. */
+  async listSummaries(limit?: number): Promise<SummaryList> {
+    this.requireAPIKey();
+    let path = `${ACCOUNT_PATH}/summaries`;
+    if (limit !== undefined) {
+      requirePositiveId(limit, "limit");
+      path += `?limit=${limit}`;
+    }
+    const out = await this.request<SummaryList>("GET", path);
+    if (!Array.isArray(out?.summaries)) {
+      throw new VerdifaxError("verdifax: the server's summary list has no summaries list");
+    }
+    return out;
+  }
+
+  /** One period summary exactly as sealed, from GET /account/summaries/{id}
+   *  (owner key), with its exact text in `sealedJson`. */
+  async getSummary(id: number): Promise<Sealed<PeriodSummary>> {
+    this.requireAPIKey();
+    requirePositiveId(id, "id");
+    const out = await this.request<Sealed<PeriodSummary>>("GET", `${ACCOUNT_PATH}/summaries/${id}`);
+    checkSummary(out);
+    return out;
+  }
+
+  /** The feed-head statement a summary counted up to, from GET
+   *  /account/summaries/{id}/head (owner key), exactly as Verdifax put it on
+   *  the public log, with its exact text in `sealedJson`. It is served also
+   *  after later events reach the feed: save it beside the summary and give
+   *  it to `verdifax-verify --summary-head` when the feed page you check
+   *  does not end with it. */
+  async getSummaryHead(id: number): Promise<Sealed<FeedHead>> {
+    this.requireAPIKey();
+    requirePositiveId(id, "id");
+    const out = await this.request<Sealed<FeedHead>>("GET", `${ACCOUNT_PATH}/summaries/${id}/head`);
+    checkSummaryHead(out, undefined, "GET /account/summaries/{id}/head");
+    return out;
+  }
+
+  /** One period summary as a PDF for a board, from GET
+   *  /account/summaries/{id}/report.pdf (owner key): the sealed figures
+   *  printed as stated. Throws {@link VerdifaxError} when the answer is not
+   *  a PDF. */
+  async downloadSummaryReport(id: number): Promise<Buffer> {
+    this.requireAPIKey();
+    requirePositiveId(id, "id");
+    const path = `${ACCOUNT_PATH}/summaries/${id}/report.pdf`;
+    const headers: Record<string, string> = { "User-Agent": this.userAgent };
+    if (this.apiKey) headers[HEADER_API_KEY] = this.apiKey;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    let resp: Response;
+    try {
+      resp = await fetch(this.baseURL + path, { method: "GET", headers, signal: controller.signal });
+    } catch (err) {
+      throw new VerdifaxError(`verdifax: HTTP transport: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      clearTimeout(timer);
+    }
+    if (!resp.ok) {
+      let message = "summary report download failed";
+      try {
+        const parsed = (await resp.json()) as { error?: unknown };
+        if (typeof parsed.error === "string" && parsed.error) message = parsed.error;
+      } catch {
+        // Not JSON: keep the generic message.
+      }
+      if (resp.status === 404) throw new NotFoundError(path, message);
+      if (resp.status === 401) throw new AuthError(resp.status, message);
+      throw new APIError(resp.status, path, message);
+    }
+    const pdf = Buffer.from(await resp.arrayBuffer());
+    if (pdf.subarray(0, 5).toString("latin1") !== "%PDF-") {
+      throw new VerdifaxError("verdifax: the summary report the server sent is not a PDF");
+    }
+    return pdf;
+  }
+
+  /** The response-time report, verdifax.response-times.v1, from GET
+   *  /account/signoffs/response-times (owner key): for each result sealed
+   *  from `from` to `to`, the waits to its first sign-off, its first
+   *  approval and the decision in force, public-log times first with the
+   *  sealed record times beside, and the customer's own target where one
+   *  applies. A sign-off shows that a registered approver key signed, not
+   *  who reviewed. `target` (1 to 31622400 seconds) applies to each result
+   *  that seals none; `pack` adds the feed it was counted from, so
+   *  `verdifax-verify` can recount it offline. The SDK returns the report as
+   *  sent and recounts nothing. */
+  async getResponseTimes(from: string, to: string, options: ResponseTimesOptions = {}): Promise<ResponseTimesReport> {
+    this.requireAPIKey();
+    requireText(from, "from");
+    requireText(to, "to");
+    refuseUnknownFields(options, { target: true, pack: true }, "getResponseTimes options");
+    const query = new URLSearchParams({ from, to });
+    if (options.target !== undefined) {
+      if (!Number.isSafeInteger(options.target) || options.target < 1 || options.target > MAX_TARGET_SECONDS) {
+        throw new VerdifaxError(`verdifax: target must be a whole number of seconds from 1 to ${MAX_TARGET_SECONDS}`);
+      }
+      query.set("target", String(options.target));
+    }
+    if (options.pack !== undefined && typeof options.pack !== "boolean") {
+      throw new VerdifaxError("verdifax: pack must be true or false");
+    }
+    if (options.pack) query.set("pack", "1");
+    const out = await this.request<ResponseTimesReport>("GET", `${ACCOUNT_PATH}/signoffs/response-times?${query.toString()}`);
+    if (out?.form !== RESPONSE_TIMES_FORM) {
+      throw new VerdifaxError(`verdifax: the server's report is not ${RESPONSE_TIMES_FORM}`);
+    }
+    return out;
+  }
+
+  /** The owner key's id: the one given, or the one owner key not revoked. */
+  private async ownerKeyId(given: number | undefined, method: string): Promise<number> {
+    if (given !== undefined) {
+      requirePositiveId(given, "keyId");
+      return given;
+    }
+    const owners = (await this.listAccountKeys()).keys.filter((k) => k?.owner === true && k?.revoked !== true);
+    if (owners.length !== 1 || !Number.isSafeInteger(owners[0]?.id) || (owners[0]?.id ?? 0) <= 0) {
+      throw new VerdifaxError(
+        `verdifax: ${method} found ${owners.length} owner keys not revoked; pass keyId, this owner key's id`,
+      );
+    }
+    return owners[0]!.id;
   }
 
   // ── Sign-off ─────────────────────────────────────────────────
@@ -1271,11 +1585,17 @@ export class VerdifaxClient {
       ...(note_hash ? { note_hash } : {}),
       ...signed,
     };
-    const out = await this.request<{ ok: boolean; signoff: SignOffRecord }>(
-      "POST",
-      base,
-      body,
-    );
+    let out: { ok: boolean; signoff: SignOffRecord };
+    try {
+      out = await this.request<{ ok: boolean; signoff: SignOffRecord }>("POST", base, body);
+    } catch (err) {
+      if (err instanceof SignOffRefusedError && !refusalNamesSent(err.signoffRefusal, signed)) {
+        throw new VerdifaxError(
+          "verdifax: the sign-off refusal the server returned does not name the signature and nonce that were sent",
+        );
+      }
+      throw err;
+    }
     const record = out?.signoff;
     if (!recordMatchesSent(record, exact, decision, previous, signed)) {
       throw new VerdifaxError(
@@ -1997,6 +2317,48 @@ export class VerdifaxClient {
     );
   }
 
+  /** Places Verdifax's own stop on an account with POST
+   *  /admin/accounts/{id}/stop, sealed in the account's feed as Verdifax's
+   *  decision. The server refuses it with an HTTP 409 while the owner
+   *  blocks Verdifax stops. The record returned must seal the action, scope
+   *  and reason hash sent, decided by verdifax_admin, or this throws
+   *  {@link VerdifaxError}. */
+  async adminStopAccount(accountId: number, options: AdminStopAccountOptions = {}): Promise<AccountStopResult> {
+    this.requireAPIKey();
+    requirePositiveId(accountId, "accountId");
+    const scope = stopScopeOf(options.signoffs, options.webhooks);
+    const reasonHash = stopReasonHash(options.reason);
+    const body: Record<string, unknown> = { signoffs: scope.signoffs, webhooks: scope.webhooks };
+    if (reasonHash) body.reason = options.reason;
+    const out = await this.request<AccountStopResult>("POST", `/admin/accounts/${accountId}/stop`, body);
+    const record = checkedStopRecord(out, "stop", "verdifax_admin", scope, reasonHash);
+    if (record.owner_signature !== undefined) {
+      throw new VerdifaxError("verdifax: Verdifax's stop the server returned carries an owner_signature");
+    }
+    return out;
+  }
+
+  /** Lifts Verdifax's own stop with POST /admin/accounts/{id}/resume. It
+   *  never lifts the owner's. `liftsSequence`, when given, must name the
+   *  stop that stands. */
+  async adminResumeAccount(accountId: number, options: AdminResumeAccountOptions = {}): Promise<AccountStopResult> {
+    this.requireAPIKey();
+    requirePositiveId(accountId, "accountId");
+    const reasonHash = stopReasonHash(options.reason);
+    const body: Record<string, unknown> = {};
+    if (options.liftsSequence !== undefined) {
+      requirePositiveId(options.liftsSequence, "liftsSequence");
+      body.lifts_sequence = options.liftsSequence;
+    }
+    if (reasonHash) body.reason = options.reason;
+    const out = await this.request<AccountStopResult>("POST", `/admin/accounts/${accountId}/resume`, body);
+    const record = checkedStopRecord(out, "resume", "verdifax_admin", undefined, reasonHash);
+    if (options.liftsSequence !== undefined && record.lifts_sequence !== options.liftsSequence) {
+      throw new VerdifaxError("verdifax: the resume the server returned lifts another stop than the one named");
+    }
+    return out;
+  }
+
   /** Deletes one record as Verdifax's decision, sealed as a tombstone in
    *  the feed of the record's account. The server refuses it with an HTTP
    *  409 while the account's owner blocks Verdifax deletion, and for a
@@ -2191,6 +2553,10 @@ export class VerdifaxClient {
         } catch {
           /* fall through to raw text */
         }
+        const refusal = signOffRefusalOf(resp.status, path, text);
+        if (refusal !== undefined) {
+          throw new SignOffRefusedError(resp.status, path, errMessage, refusal, recordHash);
+        }
         switch (resp.status) {
           case 401:
             throw new AuthError(resp.status, errMessage);
@@ -2266,6 +2632,109 @@ export class VerdifaxClient {
       ? signRequestV2(this.signingKey, req)
       : withExecuteFlags(req);
   }
+}
+
+const PERIOD_SUMMARY_FORM = "verdifax.period-summary.v1";
+const RESPONSE_TIMES_FORM = "verdifax.response-times.v1";
+const MAX_TARGET_SECONDS = 366 * 24 * 3600;
+
+/** A non-empty string argument, or a refusal before sending. */
+function requireText(value: unknown, name: string): void {
+  if (typeof value !== "string" || value === "") {
+    throw new VerdifaxError(`verdifax: ${name} must be a non-empty string, an RFC 3339 time`);
+  }
+}
+
+/** A period summary as sealed: its format and its hash, or a refusal. */
+function checkSummary(summary: unknown): void {
+  const s = summary as { format?: unknown; summary_hash?: unknown } | undefined;
+  if (s?.format !== PERIOD_SUMMARY_FORM || typeof s.summary_hash !== "string" || !/^[0-9a-f]{64}$/.test(s.summary_hash)) {
+    throw new VerdifaxError(`verdifax: the server's summary is not a sealed ${PERIOD_SUMMARY_FORM}`);
+  }
+}
+
+/** Checks the shape of a summary's feed-head statement, and, when the
+ *  summary is given, that it is the head the summary names. */
+function checkSummaryHead(head: unknown, summary: PeriodSummary | undefined, source: string): void {
+  const h = head as Partial<FeedHead> | undefined;
+  const hex = (v: unknown): boolean => typeof v === "string" && /^[0-9a-f]{64}$/.test(v);
+  if (
+    typeof h !== "object" || h === null || Array.isArray(h) || h.format !== "verdifax.feed-head.v1" ||
+    typeof h.account !== "string" || !/^account-[0-9]+$/.test(h.account) ||
+    !Number.isSafeInteger(h.sequence) || (h.sequence as number) <= 0 ||
+    !hex(h.head_hash) || !hex(h.head_statement_hash) || typeof h.stated_at !== "string" || h.stated_at === "" ||
+    (h.anchor !== undefined && h.anchor !== null && (typeof h.anchor !== "object" || Array.isArray(h.anchor)))
+  ) {
+    throw new VerdifaxError(`verdifax: ${source} returned a head that is not a verdifax.feed-head.v1 statement`);
+  }
+  if (
+    summary !== undefined &&
+    (h.head_statement_hash !== summary.head_statement_hash || h.sequence !== summary.head_sequence || h.head_hash !== summary.head_hash)
+  ) {
+    throw new VerdifaxError(`verdifax: ${source} returned a head that is not the one its summary names`);
+  }
+}
+
+/** The sealed refusal on the 409 a sign-off route answers while a stop
+ *  refusing sign-offs stands, or undefined for every other answer. It keeps
+ *  the server's exact text in sealedJson. */
+function signOffRefusalOf(status: number, path: string, text: string): SignOffRefusalRecord | undefined {
+  if (status !== 409 || (path !== SIGNOFFS_PATH && path !== ACCOUNT_SIGNOFFS_PATH)) return undefined;
+  let env: { error_code?: unknown; signoff_refusal?: unknown };
+  try {
+    env = parseSealed<{ error_code?: unknown; signoff_refusal?: unknown }>(text);
+  } catch {
+    return undefined;
+  }
+  const refusal = env?.signoff_refusal;
+  if (env?.error_code !== "ACCOUNT_STOPPED" || typeof refusal !== "object" || refusal === null || Array.isArray(refusal)) {
+    return undefined;
+  }
+  return refusal as SignOffRefusalRecord;
+}
+
+/** True when a sealed sign-off refusal names the sign-off that was sent. */
+function refusalNamesSent(refusal: SignOffRefusalRecord, sent: { signature: string; nonce: string }): boolean {
+  return (
+    refusal.format === "verdifax.signoff-refusal.v1" &&
+    refusal.signature === sent.signature &&
+    refusal.nonce === sent.nonce
+  );
+}
+
+/** A stop or resume answer's record, checked against what was sent: the
+ *  action, who decided, the scope (a resume carries none) and the reason's
+ *  hash. Throws {@link VerdifaxError} on any difference. */
+function checkedStopRecord(
+  out: AccountStopResult,
+  action: "stop" | "resume",
+  decidedBy: "owner" | "verdifax_admin",
+  scope: StopScope | undefined,
+  reasonHash: string,
+): AccountStopRecord {
+  const record = out?.account_stop;
+  const sealedScope = record?.scope;
+  const scopeMatches =
+    scope === undefined
+      ? sealedScope === undefined || sealedScope === null
+      : typeof sealedScope === "object" &&
+        sealedScope !== null &&
+        sealedScope.signoffs === scope.signoffs &&
+        sealedScope.webhooks === scope.webhooks;
+  if (
+    typeof record !== "object" ||
+    record === null ||
+    record.format !== "verdifax.account-stop.v1" ||
+    record.action !== action ||
+    record.decided_by !== decidedBy ||
+    !scopeMatches ||
+    (record.reason_sha256 ?? "") !== reasonHash
+  ) {
+    throw new VerdifaxError(
+      `verdifax: the ${action} the server returned does not seal the action, decided_by, scope and reason that were sent`,
+    );
+  }
+  return record;
 }
 
 /** An owner signature as sent, with the public key of the key that made it. */

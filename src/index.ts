@@ -15,7 +15,9 @@ export { parseSealed } from "./sealed.js";
 export type { Sealed, SealedList } from "./sealed.js";
 export { fromEnv } from "./config.js";
 export { captureEnvironment } from "./environment.js";
-export { EXECUTE_FIELDS, formatProviderPayload } from "./helpers.js";
+export { EXECUTE_FIELDS, formatProviderPayload, hmacSha256Reference, validateDataUse } from "./helpers.js";
+export { accountStopSubject } from "./account-stop.js";
+export { ruleInForce } from "./rule-in-force.js";
 export { RUN_STATUSES } from "./types.js";
 export {
   CRES_ENGINE_VERSION,
@@ -54,11 +56,44 @@ export {
   AuthError,
   NotFoundError,
   SignalFeedError,
+  SignOffRefusedError,
   VerdifaxError,
 } from "./errors.js";
 
 export type {
+  PeriodSummary,
+  ResponseAggregates,
+  ResponseEndAggregate,
+  ResponseEndPoint,
+  ResponseSpread,
+  ResponseTimesOptions,
+  ResponseTimesReport,
+  ResultTarget,
+  ResultTime,
+  RuleInForceDecision,
+  SealedTarget,
+  SignOffTargetPassedRecord,
+  SummaryAnswer,
+  SummaryFigure,
+  SummaryList,
+  SummaryListItem,
   Account,
+  AccountStopRecord,
+  AccountStopResult,
+  AccountStopState,
+  AccountStopSubjectFields,
+  AdminResumeAccountOptions,
+  AdminStopAccountOptions,
+  AllowedTool,
+  DataUse,
+  PolicyReviewDueRecord,
+  ResumeAccountOptions,
+  SetupChangeRecord,
+  SignalPlace,
+  SignOffRefusalRecord,
+  StopAccountOptions,
+  StopHold,
+  StopScope,
   AccountChange,
   AccountChangeAction,
   AccountInfo,

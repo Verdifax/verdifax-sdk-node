@@ -18,6 +18,8 @@
  * ```
  */
 
+import type { SignOffRefusalRecord } from "./types.js";
+
 // Base class types `name` as `string` (not a literal) so subclasses
 // can narrow with their own literal types via `override`. Without
 // this the dts compiler (tsup) refuses to emit declarations
@@ -79,6 +81,27 @@ export class APIError extends VerdifaxError {
         enumerable: false,
       });
     }
+  }
+}
+
+/** HTTP 409 on a sign-off made while a stop whose scope refuses sign-offs
+ *  stands on the account (round 64). The server sealed the refusal in the
+ *  account's feed as a `signoff.refused` event; `signoffRefusal` is that
+ *  record, verdifax.signoff-refusal.v1, which keeps the attempt exactly as
+ *  the approver signed it, and `recordHash` is its hash. The client checks
+ *  that the record names the sign-off it sent before throwing this. It is
+ *  an {@link APIError}, so code that catches those still catches it. */
+export class SignOffRefusedError extends APIError {
+  override readonly name: string = "VerdifaxSignOffRefusedError";
+  constructor(
+    status: number,
+    path: string,
+    message: string,
+    /** The sealed refusal record, as the server sent it. */
+    public readonly signoffRefusal: SignOffRefusalRecord,
+    recordHash?: string,
+  ) {
+    super(status, path, message, recordHash);
   }
 }
 

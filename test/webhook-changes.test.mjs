@@ -100,11 +100,13 @@ test("deleteWebhook of no such subscription sends no removal", async () => {
   assert.ok(seen.every((r) => r.method !== "DELETE"));
 });
 
-test("the 1.16.0 changelog entry comes first, and no dash longer than a hyphen", () => {
+test("the 1.17.0 changelog entry comes first, 1.16.0 stays, and no dash longer than a hyphen", () => {
   const changelog = readFileSync(new URL("../CHANGELOG.md", import.meta.url), "utf8");
-  assert.match(changelog, /^# Changelog\n\n## 1\.16\.0\n/);
+  assert.match(changelog, /^# Changelog\n\n## 1\.17\.0\n/);
+  assert.ok(changelog.includes("The user agent is `verdifax-sdk-node/1.17.0`."));
+  assert.match(changelog, /\n## 1\.16\.0\n/);
   assert.ok(changelog.includes("The user agent is `verdifax-sdk-node/1.16.0`."));
-  for (const file of ["../src/signals.ts", "../src/client.ts", "../src/types.ts", "../README.md", "../CHANGELOG.md", "./webhook-changes.test.mjs", "./webhook-server.mjs"]) {
+  for (const file of ["../src/signals.ts", "../src/client.ts", "../src/types.ts", "../src/helpers.ts", "../src/errors.ts", "../src/account-stop.ts", "../README.md", "../CHANGELOG.md", "./webhook-changes.test.mjs", "./webhook-server.mjs", "./round-64.test.mjs"]) {
     assert.ok(!/[\u2013\u2014]/.test(readFileSync(new URL(file, import.meta.url), "utf8")), `${file} has an en or em dash`);
   }
 });

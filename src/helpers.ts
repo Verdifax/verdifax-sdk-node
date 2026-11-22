@@ -2,8 +2,11 @@
  * Request-body rules shared by every path to POST /execute.
  */
 
+import { createHmac } from "node:crypto";
+
 import { VerdifaxError } from "./errors.js";
 import type {
+  DataUse,
   ExecuteRequest,
   JobLink,
   PolicyContext,
@@ -151,6 +154,7 @@ const POLICY_CONTEXT_FIELDS: Record<keyof PolicyContext, true> = {
   object_id: true,
   classification: true,
   data_quality: true,
+  data_use: true,
 };
 
 const DATA_QUALITY_FIELDS: Record<keyof DataQuality, true> = {
@@ -159,6 +163,22 @@ const DATA_QUALITY_FIELDS: Record<keyof DataQuality, true> = {
   checks: true,
 };
 const DATA_CHECK_FIELDS: Record<keyof DataCheck, true> = { name: true, result: true };
+const DATA_USE_FIELDS: Record<keyof DataUse, true> = {
+  purpose: true,
+  basis: true,
+  categories: true,
+  reference: true,
+};
+// A data-use code, matched against the whole text, as the server's
+// psl.DataUseCode is (test/sdk-data-use-vector.json). No /m flag, so a
+// trailing newline is refused.
+const DATA_USE_CODE = /^[a-z0-9][a-z0-9._:-]{0,63}$/;
+// The one form a data-use reference may take: a keyed digest the customer
+// computed.
+const DATA_USE_REFERENCE = /^hmac-sha256:[0-9a-f]{64}$/;
+const MAX_DATA_USE_CATEGORIES = 20;
+// The shortest key hmacSha256Reference takes, in bytes.
+const MIN_REFERENCE_KEY_BYTES = 32;
 const DATA_CHECK_RESULTS = ["pass", "fail", "warn"];
 const MAX_DATA_SOURCE_BYTES = 200;
 const MAX_DATA_CHECKS = 50;
@@ -258,6 +278,85 @@ function checkedDataQuality(value: unknown): DataQuality {
   return out;
 }
 
+/** Checks a data-use declaration (`policy_context.data_use`, round 64) the
+ *  way the server checks it, and returns a copy to send: `purpose` and
+ *  `basis` are required codes, `categories` is a list of at most 20
+ *  distinct codes, and `reference`, when given and not empty, is
+ *  `hmac-sha256:` and 64 lowercase hex digits. A code is a lowercase letter
+ *  or digit, then up to 63 lowercase letters, digits, dots, underscores,
+ *  colons or hyphens, so no space or `@` can be written in one. No other
+ *  field is accepted. An empty `categories` list or `reference` is a value
+ *  left out, as the server reads it. Verdifax seals the declaration as
+ *  made and does not check it. Throws {@link VerdifaxError} naming the
+ *  first problem. */
+export function validateDataUse(value: unknown): DataUse {
+  if (!plainObject(value)) {
+    throw new VerdifaxError("verdifax: policy_context.data_use must be an object");
+  }
+  refuseUnknownFields(value, DATA_USE_FIELDS, "policy_context.data_use");
+  const { purpose, basis, categories, reference } = value;
+  for (const [name, code] of [["purpose", purpose], ["basis", basis]] as const) {
+    if (typeof code !== "string" || !DATA_USE_CODE.test(code)) {
+      throw new VerdifaxError(
+        `verdifax: policy_context.data_use.${name} is required and must be a code of the form ${DATA_USE_CODE.source}`,
+      );
+    }
+  }
+  const out: DataUse = { purpose: purpose as string, basis: basis as string };
+  if (categories !== undefined) {
+    if (!Array.isArray(categories)) {
+      throw new VerdifaxError("verdifax: policy_context.data_use.categories must be a list");
+    }
+    if (categories.length > MAX_DATA_USE_CATEGORIES) {
+      throw new VerdifaxError(
+        `verdifax: policy_context.data_use names more than ${MAX_DATA_USE_CATEGORIES} categories`,
+      );
+    }
+    const seen = new Set<string>();
+    for (const category of categories as unknown[]) {
+      if (typeof category !== "string" || !DATA_USE_CODE.test(category) || seen.has(category)) {
+        throw new VerdifaxError(
+          `verdifax: policy_context.data_use.categories must be distinct codes of the form ${DATA_USE_CODE.source}`,
+        );
+      }
+      seen.add(category);
+    }
+    out.categories = [...seen];
+  }
+  if (reference !== undefined) {
+    if (typeof reference !== "string" || (reference !== "" && !DATA_USE_REFERENCE.test(reference))) {
+      throw new VerdifaxError(
+        "verdifax: policy_context.data_use.reference must be hmac-sha256: and 64 lowercase hex digits, a keyed digest computed on your own machine (hmacSha256Reference)",
+      );
+    }
+    out.reference = reference;
+  }
+  return out;
+}
+
+/** The keyed reference a data-use declaration may carry: `hmac-sha256:`
+ *  and the lowercase hex HMAC-SHA256 of `id`'s UTF-8 bytes under `key`.
+ *  It is computed here, on your machine, so the identifier itself (a
+ *  consent or contract number, for example) never leaves it; only the
+ *  digest is sent and sealed. `key` is a secret of at least 32 bytes that
+ *  you keep; the same key and identifier always give the same reference.
+ *  Verdifax seals the reference as declared and never checks it. Throws
+ *  {@link VerdifaxError} for a shorter key or an empty identifier. */
+export function hmacSha256Reference(key: Uint8Array, id: string): string {
+  if (!(key instanceof Uint8Array) || key.length < MIN_REFERENCE_KEY_BYTES) {
+    throw new VerdifaxError(
+      `verdifax: hmacSha256Reference needs a key of at least ${MIN_REFERENCE_KEY_BYTES} bytes`,
+    );
+  }
+  if (typeof id !== "string" || id === "") {
+    throw new VerdifaxError("verdifax: hmacSha256Reference needs a non-empty identifier");
+  }
+  if (/[\uD800-\uDFFF]/u.test(id)) {
+    throw new VerdifaxError("verdifax: hmacSha256Reference identifier has no UTF-8 form");
+  }
+  return "hmac-sha256:" + createHmac("sha256", key).update(Buffer.from(id, "utf8")).digest("hex");
+}
+
 function refuseOutsideList(
   value: unknown,
   allowed: readonly string[],
@@ -288,6 +387,7 @@ export function checkedPolicyContext(context: PolicyContext): PolicyContext {
     object_id,
     classification,
     data_quality,
+    data_use,
   } = context;
   if (actor_type !== undefined) {
     refuseOutsideList(actor_type, POLICY_ACTOR_TYPES, "actor_type");
@@ -330,6 +430,9 @@ export function checkedPolicyContext(context: PolicyContext): PolicyContext {
   }
   if (data_quality !== undefined) {
     out.data_quality = checkedDataQuality(data_quality);
+  }
+  if (data_use !== undefined) {
+    out.data_use = validateDataUse(data_use);
   }
   return out;
 }
@@ -402,7 +505,32 @@ const ATTESTED_CONTEXT_FIELDS: Record<string, true> = {
   decision_kind: true,
   decision_result: true,
   decision_note: true,
+  // Round 64: the AI assistant's own declared name and version, as an MCP
+  // client gives them, sealed as declared, not verified.
+  client_name: true,
+  client_version: true,
 };
+const MAX_CLIENT_FIELD_BYTES = 128;
+
+/** Refuses a declared client name or version the server would refuse: more
+ *  than 128 bytes, anything but printable ASCII, or a leading or trailing
+ *  space. An empty value is one left out. */
+function checkClientFields(context: Record<string, unknown>): void {
+  for (const name of ["client_name", "client_version"]) {
+    const value = context[name];
+    if (value === undefined || value === null) continue;
+    if (
+      typeof value !== "string" ||
+      value.length > MAX_CLIENT_FIELD_BYTES ||
+      !/^[\x20-\x7e]*$/.test(value) ||
+      value.trim() !== value
+    ) {
+      throw new VerdifaxError(
+        `verdifax: attested_context.${name} must be at most ${MAX_CLIENT_FIELD_BYTES} characters of printable ASCII with no leading or trailing space`,
+      );
+    }
+  }
+}
 
 /** Throws on a top-level key outside {@link EXECUTE_FIELDS} or an
  *  attested_context key the server does not read. */
@@ -414,6 +542,7 @@ export function refuseUnknownRequestFields(req: object, label = "request"): void
   const context = (req as ExecuteRequest).attested_context;
   if (typeof context === "object" && context !== null) {
     refuseUnknownFields(context, ATTESTED_CONTEXT_FIELDS, "attested_context");
+    checkClientFields(context as Record<string, unknown>);
   }
 }
 

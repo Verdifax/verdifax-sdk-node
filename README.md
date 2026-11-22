@@ -92,6 +92,12 @@ if (v.verified) {
 | `client.getPolicy(documentHash)` | `GET /policies/{document_hash}` | required |
 | `client.testPolicy({ inputs, document?, documentHash? })` | `POST /policies/test` | required |
 | `client.getPolicyHistory()` | `GET /policies/history` | required |
+| `client.createSummary(from, to)` | `POST /account/summaries`: a period summary for a board, sealed and on the public log | owner key |
+| `client.listSummaries(limit?)` | `GET /account/summaries` | owner key |
+| `client.getSummary(id)` | `GET /account/summaries/{id}` | owner key |
+| `client.getSummaryHead(id)` | `GET /account/summaries/{id}/head` | owner key |
+| `client.downloadSummaryReport(id)` | `GET /account/summaries/{id}/report.pdf` | owner key |
+| `client.getResponseTimes(from, to, { target, pack })` | `GET /account/signoffs/response-times` | owner key |
 | `client.activatePolicy(documentHash)` | `POST /policies/{document_hash}/activate` | required |
 | `client.getAccount()` | `GET /account` | owner key |
 | `client.createAccountKey(name, { expiresAt? })` | `POST /account/keys` | owner key |
@@ -269,6 +275,21 @@ writeFileSync("policy-history.json", (await client.getPolicyHistory()).sealedJso
 
 `policy_context.data_quality` is your declaration about the data the decision used: `source` (at most 200 bytes), `as_of` (a time such as `2026-11-11T09:00:00Z` or `2026-11-11T09:00:00+05:30`) and `checks`, up to 50, each a distinct `name` of at most 100 bytes and a `result` of `pass`, `fail` or `warn`. It needs no attested actor. It is sealed with the other values, a policy's `data_quality` condition can require and test it, and Verdifax judges none of it. A declaration the server would refuse is refused before sending.
 
+`policy_context.data_use` (round 64) is your declaration of the data use the decision rests on, in your own short codes: `purpose` and `basis` (required), `categories` (up to 20, each once) and an optional `reference`. A code is a lowercase letter or digit, then up to 63 lowercase letters, digits, dots, underscores, colons or hyphens, so no space or `@` fits in one. The reference is only ever `hmac-sha256:` and 64 lowercase hex digits, a keyed digest you compute on your own machine with `hmacSha256Reference(key, id)` from an identifier such as a consent or contract number and a secret key of at least 32 bytes that you keep; the identifier itself is never sent. `validateDataUse` checks a declaration as the server does, and every run path calls it before sending. Verdifax seals the declaration as made, in the policy inputs and in its own `data_use` field of the record or receipt, a refusal before the rules ran included, and a rule's `data_use` condition can test it. Verdifax does not check the declaration and does not judge whether the use or the basis is right. Reading a record that carries it needs the verdifax-verify release that reads it, named in the verifier's release notes.
+
+```typescript
+import { hmacSha256Reference } from "verdifax";
+
+const reference = hmacSha256Reference(referenceKey, "consent-48213"); // computed here; only the digest is sent
+await client.attest({
+  program_id, route_id, registry_record_hash,
+  payload_text: "review claim 77",
+  policy_context: { data_use: { purpose: "claims.review", basis: "contract", categories: ["claims"], reference } },
+});
+```
+
+`attested_context` also takes `client_name` and `client_version` (round 64): the AI assistant's own declared name and version, as an MCP client gives them, each at most 128 characters of printable ASCII with no leading or trailing space. They are sealed as declared, not verified, and a policy's setup watch and `attested_setup` condition can read them.
+
 Verdifax did not write, review or approve your policy. A pass means the rules ran, not that they are good rules.
 
 A policy judges what you declared. It cannot show the declared facts are true.
@@ -337,6 +358,37 @@ The owner key's request key signs each of these changes over `verdifax.owner-cha
 `adminReplaceOwnerKey(accountId)` starts the replacement of a lost owner key, on the owner's written request, by the account's number as `adminListAccounts` lists it in `id`. It seals the request in the account's feed and emails a one-time link, good for 72 hours, to the address on file. Its result never holds the link or a key: the new key is made when the owner opens the link. `adminDeleteRun(runId)` deletes a record as Verdifax's decision, sealed in the feed of the record's account. The server refuses either with an `APIError` (409) while the owner blocks it.
 
 `exportAccountRuns` and `exportAccountRunsCSV` take the same period and `job_id` as `exportRuns` and check the CSV counts the same way. The JSON form also carries `account_id`, and `account_policy_documents` and `account_policy_history` once the account has loaded a policy. `listAccountRuns` pages like `listRuns`. `revokeAccountKey` revokes a member key, and a key in another account, or an owner key, throws `NotFoundError`. `adminCreateKey(name, { accountId })` puts a new customer key in an existing account, by its number.
+
+### Account stop
+
+The owner and Verdifax each hold a stop of their own on the account, and each lifts only its own (round 64). While any stop stands, every new run is refused with a sealed deny receipt (`fired_rule_id` `account_stop`, code `ACCOUNT_STOPPED`) and HTTP 422. Runs already in progress finish, and the stop's record counts them. No key is revoked or changed by a stop.
+
+```typescript
+// signingKey is the owner key's registered request key.
+const owner = new VerdifaxClient({ apiKey: process.env.VERDIFAX_OWNER_KEY!, signingKey: privateKey });
+await owner.stopAccount({ signoffs: "refuse", webhooks: "continue", reason: "incident 42" });
+const state = await owner.getAccountStop(); // the stops standing, the verdifax-stop setting, runs in progress
+await owner.resumeAccount(); // lifts the owner's stop named in GET /account/stop
+await owner.setAccountSetting("verdifax-stop", "blocked"); // Verdifax can no longer stop the account
+```
+
+`stopAccount` sends the scope, `signoffs` (`accept`, the default, or `refuse` sign-offs on results already sealed) and `webhooks` (`continue`, the default, or `pause` deliveries), and an optional `reason` of at most 1000 bytes, of which only the SHA-256 is sealed. By default the owner key's request key signs it over the owner-change form with the change `account.stopped` and the subject `accountStopSubject` builds: the action, `key=` and the owner key's id, the scope, and `reason_sha256=`. The owner key's id is `keyId`, or the one owner key not revoked in `listAccountKeys`; the account's label is `accountId`, or `getAccount`'s. With `unsigned: true` no signature is sent, and the record seals the server's word that this key asked; a member key its owner granted `account_stop` stops only that way. `resumeAccount` is always signed (change `account.resumed`) and names the stop it lifts by its feed place, `liftsSequence`, read from `getAccountStop` when left out. The record each returns must seal what was sent, or the call throws `VerdifaxError`. `adminStopAccount(accountId)` and `adminResumeAccount(accountId)` place and lift Verdifax's own stop, sealed as `verdifax_admin`; the server refuses Verdifax's stop with an `APIError` (409) while the owner's `verdifax-stop` setting is `blocked`.
+
+While a stop whose scope refuses sign-offs stands, `signOff` throws `SignOffRefusedError`, an `APIError` with status 409 whose `signoffRefusal` is the sealed refusal record (`verdifax.signoff-refusal.v1`, in the feed as `signoff.refused`) and whose `recordHash` is its hash. The client checks that the record names the sign-off it sent. A refused sign-off is not a sign-off.
+
+### Tool allowlist
+
+`createAccountKey(name, { allowedTools })` grants a new member key a tool allowlist (round 64): one or more distinct verdifax-mcp tool names, and `account_stop`, which lets the key place the owner's stop and never lift one. Owner powers and approver keys can never be granted, and a name outside the list is refused before sending. The server seals the list, sorted, in the key's `key.created` record and then refuses the key on every route outside the routes those tools call, apart from the key check (`GET /stats`) and the key's own request-key registration (`POST /keys/request-key`); the client checks the key it gets back carries that list. `getAllowedTools()` reads the key's own allowlist from the `X-Verdifax-Allowed-Tools` header of `GET /stats`, or returns `null` when the key has none.
+
+### Board summary and response times
+
+`createSummary(from, to)` asks the server to seal a period summary for a board (round 64): the figures the counting rules give over the account's feed from `from` to `to`, RFC 3339 times, up to a feed head on the public log, stated by Verdifax as `verdifax.period-summary.v1` and anchored as its own public-log entry. The answer is `{ id, reused, summary, head }`; `reused` is true when that period was already sealed over the same feed, and `head` is the feed-head statement the summary counted up to, as put on the public log. `listSummaries(limit)`, `getSummary(id)`, `getSummaryHead(id)` and `downloadSummaryReport(id)` read them back, the last as the PDF's bytes. `getSummaryHead(id)` serves the head also after later events reach the feed; save it beside the summary and give it to `verdifax-verify --summary --summary-head` when the feed page you check no longer ends with it. `getResponseTimes(from, to, { target, pack })` returns the response-time report, `verdifax.response-times.v1`: for each result of the period, the wait to its first sign-off, its first approval and the decision in force, public-log times first with the sealed record times beside, against the customer's own target where one applies; `pack: true` adds the feed it was counted from. A sign-off counted there shows that a registered approver key signed, not who reviewed. The SDK returns each document as the server sent it, with its exact text in `sealedJson`, and recounts nothing: `verdifax-verify` recounts every figure from the feed. None of it judges a result or a wait.
+
+A policy may set a response target for a result's sign-off. When it asks, a `run.sealed` entry carries the target as `signoff_target` and a refused run's receipt context as `response_target` (a `SealedTarget`: `within`, `compare`, `notice`), and a `signoff.target_passed` event's entry, a `SignOffTargetPassedRecord`, states that no sign-off of the kind the target compares was on the public log by its deadline.
+
+### Rule in force
+
+`ruleInForce(document, policyHistory?)` names the policy change each decision in a record or receipt was made under. `document` is a record bundle, as `getRunArtifacts` returns it, or a receipt answer such as `getDenyReceipt` returns. Each decision gives `policy` (`account` or `key`), `activation_hash`, `policy_hash`, `fired_rule_id`, `outcome` and `found_by`. A refusal for missing fields sealed before round 64 names no change on its receipt; for it, pass `policyHistory`, the list `getPolicyHistory` or the account's history returns, and the helper takes the change in force at its `gap_clock`, compared to the nanosecond. With a history that holds the change, each decision also gives its `sequence`, `chain_id` and `activated_at`. It makes no request and checks nothing: `verdifax-verify` checks the history and the records.
 
 ## Sign-off
 
@@ -479,6 +531,10 @@ A webhook delivery is a copy: the pull feed and the public log are the record. A
 `signalEventHash(kind, entryHash, { account, sequence, previousSignalHash })` recomputes an event's `event_hash`, the hash the next event names. It makes no request.
 
 `verdifax-verify --signals FILE` checks a saved feed: each entry as its own kind, that the place each entry seals is the event's place, and that the numbers and links run without a gap.
+
+### Round 64 feed kinds
+
+The feed adds six kinds, each emitted only for an account that turned its feature on: `account.stopped` and `account.resumed` (an `AccountStopRecord`), `setup.changed` (a `SetupChangeRecord`: what the request declared and what Verdifax's AI review stated about itself, never which model ran), `review.due` (a `PolicyReviewDueRecord`), `signoff.target_passed` (a `SignOffTargetPassedRecord`) and `signoff.refused` (a `SignOffRefusalRecord`). A webhook may name them. When the policy in force watches the setup, `run.sealed` entries carry `setup_hash`, the run's setup fingerprint, and a refused run's receipt context carries it too when the watch counts refused runs (`include_refused`). The client reads any kind it does not know as the server sent it, and `pendingSignOffs` never counts a `signoff.refused` entry as a sign-off. Reading these records needs the verdifax-verify release that reads them, named in the verifier's release notes.
 
 ## Exact records
 

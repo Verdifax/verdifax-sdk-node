@@ -217,8 +217,8 @@ test("setAccountSetting with accountId signs over it and does not read GET /acco
 
 test("setAccountSetting refuses a setting or value outside the server's before sending", async () => {
   const { seen } = await withServer(ownerServer({}), async (c) => {
-    for (const setting of ["owner_replacement", "verdifax_deletion", "Owner-Replacement", "", undefined, "constructor", "toString"]) {
-      await assert.rejects(c.setAccountSetting(setting, "blocked"), (err) => err instanceof VerdifaxError && /setting must be owner-replacement or verdifax-deletion/.test(err.message));
+    for (const setting of ["owner_replacement", "verdifax_deletion", "verdifax_stop", "Owner-Replacement", "", undefined, "constructor", "toString"]) {
+      await assert.rejects(c.setAccountSetting(setting, "blocked"), (err) => err instanceof VerdifaxError && /setting must be owner-replacement, verdifax-deletion or verdifax-stop/.test(err.message));
     }
     for (const value of ["Blocked", "block", "", true, undefined, null]) {
       await assert.rejects(c.setAccountSetting("verdifax-deletion", value), (err) => err instanceof VerdifaxError && /value must be allowed or blocked/.test(err.message));
@@ -434,7 +434,7 @@ test("createWebhook takes account.changed and run.deleted, and names every kind 
   assert.ok(result instanceof VerdifaxError);
   assert.match(
     result.message,
-    /\(run\.refused, run\.halted, run\.failed, policy\.changed, signoff\.recorded, approver\.registered, approver\.revoked, key\.created, key\.revoked, run\.published, run\.unpublished, chain\.gap, run\.sealed, chain\.interrupted, account\.changed, run\.deleted\)/,
+    /\(run\.refused, run\.halted, run\.failed, policy\.changed, signoff\.recorded, approver\.registered, approver\.revoked, key\.created, key\.revoked, run\.published, run\.unpublished, chain\.gap, run\.sealed, chain\.interrupted, account\.changed, run\.deleted, account\.stopped, account\.resumed, setup\.changed, review\.due, signoff\.target_passed, signoff\.refused\)/,
   );
 });
 

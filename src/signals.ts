@@ -73,6 +73,14 @@ const SIGNAL_KINDS: readonly SignalKind[] = Object.freeze([
   "chain.interrupted",
   "account.changed",
   "run.deleted",
+  // Round 64: emitted only for an account that turned the feature on. A
+  // reader of the feed passes any kind it does not know through unchanged.
+  "account.stopped",
+  "account.resumed",
+  "setup.changed",
+  "review.due",
+  "signoff.target_passed",
+  "signoff.refused",
 ]);
 
 /** A read of the feed: the path with its query and the timeout to use. */
