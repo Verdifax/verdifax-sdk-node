@@ -563,13 +563,21 @@ function webhookSecretBytes(secret: string): Buffer {
   if (
     !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded) ||
     key.length === 0 ||
-    key.toString("base64").replace(/=+$/, "") !== encoded.replace(/=+$/, "")
+    withoutPadding(key.toString("base64")) !== withoutPadding(encoded)
   ) {
     throw new VerdifaxError(
       "verdifax: verifyWebhook needs the subscription's secret: whsec_ and then base64",
     );
   }
   return key;
+}
+
+/** The text without its trailing "=" padding, read in one pass from the end,
+ *  so its time grows with the length of the text and never faster. */
+function withoutPadding(text: string): string {
+  let end = text.length;
+  while (end > 0 && text.charCodeAt(end - 1) === 61) end--;
+  return text.slice(0, end);
 }
 
 /** Every value of a header, by name without regard to case. */

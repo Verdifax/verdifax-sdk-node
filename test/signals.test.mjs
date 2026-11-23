@@ -237,6 +237,8 @@ test("verifyWebhook refuses a wrong secret prefix, a bad secret or another secre
     [undefined, /starts with whsec_/],
     ["whsec_", /whsec_ and then base64/],
     ["whsec_not base64!", /whsec_ and then base64/],
+    [`${VECTOR.webhook_secret.replace(/=+$/, "")}===`, /whsec_ and then base64/],
+    [`whsec_${"=".repeat(200000)}x`, /whsec_ and then base64/],
     [other, /no v1 signature in webhook-signature matches/],
   ]) {
     assert.throws(
@@ -245,6 +247,11 @@ test("verifyWebhook refuses a wrong secret prefix, a bad secret or another secre
       String(secret),
     );
   }
+  // A long run of "=" is read in time that grows with its length (CodeQL
+  // js/polynomial-redos): 200,000 of them are refused well inside a second.
+  const started = Date.now();
+  assert.throws(() => verifyWebhook(HEADERS, VECTOR.webhook_body, `whsec_AAAA${"=".repeat(200000)}`, { now: AT }), /whsec_ and then base64/);
+  assert.ok(Date.now() - started < 1000);
   // An unpadded copy of the right secret is the same key.
   assert.ok(verifyWebhook(HEADERS, VECTOR.webhook_body, VECTOR.webhook_secret.replace(/=+$/, ""), { now: AT }));
 });
