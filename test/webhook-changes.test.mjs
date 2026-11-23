@@ -100,9 +100,11 @@ test("deleteWebhook of no such subscription sends no removal", async () => {
   assert.ok(seen.every((r) => r.method !== "DELETE"));
 });
 
-test("the 1.17.0 changelog entry comes first, 1.16.0 stays, and no dash longer than a hyphen", () => {
+test("the 1.17.1 changelog entry comes first, 1.17.0 and 1.16.0 stay, and no dash longer than a hyphen", () => {
   const changelog = readFileSync(new URL("../CHANGELOG.md", import.meta.url), "utf8");
-  assert.match(changelog, /^# Changelog\n\n## 1\.17\.0\n/);
+  assert.match(changelog, /^# Changelog\n\n## 1\.17\.1\n/);
+  assert.ok(changelog.includes("The user agent is `verdifax-sdk-node/1.17.1`."));
+  assert.match(changelog, /\n## 1\.17\.0\n/);
   assert.ok(changelog.includes("The user agent is `verdifax-sdk-node/1.17.0`."));
   assert.match(changelog, /\n## 1\.16\.0\n/);
   assert.ok(changelog.includes("The user agent is `verdifax-sdk-node/1.16.0`."));

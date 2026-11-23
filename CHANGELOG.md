@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.17.1
+
+`verifyWebhook` removes a secret's trailing `=` padding in one pass from the end instead of with a regular expression, so the time it takes grows with the secret's length and never faster (GitHub code scanning, js/polynomial-redos). Every secret is accepted or refused exactly as in 1.17.0: the check before it already allowed at most two `=` characters, so no secret could reach the slow case.
+
+- The user agent is `verdifax-sdk-node/1.17.1`.
+
 ## 1.17.0
 
 Round 64: the data-use declaration, the declared client, the account stop, the tool allowlist, the new feed kinds, the board summary, response times and the rule in force. Each needs a server with its round 64 release setting on, and verdifax-verify v0.38.0 to read the records it makes.
