@@ -190,6 +190,8 @@ const ACCOUNT_SETTING_CHANGES: Record<AccountSetting, string> = {
   "verdifax-deletion": "setting.verdifax_deletion",
   // Round 64: the owner's setting that allows or blocks Verdifax's stop.
   "verdifax-stop": "setting.verdifax_stop",
+  // Whether the owner key reads the account's records.
+  "owner-reads": "setting.owner_reads",
 };
 const ACCOUNT_SETTING_VALUES = new Set(["allowed", "blocked"]);
 const RUN_DELETED_CHANGE = "run.deleted";
@@ -1012,14 +1014,17 @@ export class VerdifaxClient {
     return this.activatePolicyAt(ACCOUNT_POLICIES_PATH, documentHash, chain);
   }
 
-  /** Sets one of the owner's blocks on Verdifax: `owner-replacement`, which
+  /** Sets one of the owner's settings: `owner-replacement`, which
    *  while `blocked` stops Verdifax replacing, revoking or starting a
-   *  replacement of the owner key, or `verdifax-deletion`, which while
-   *  `blocked` stops Verdifax deleting one of the account's records.
-   *  `value` is `allowed` or `blocked`.
+   *  replacement of the owner key; `verdifax-deletion`, which while
+   *  `blocked` stops Verdifax deleting one of the account's records;
+   *  `verdifax-stop`, which while `blocked` stops Verdifax placing its own
+   *  stop; or `owner-reads`, which while `allowed` lets the owner key read
+   *  the record, receipts and reports of every run of the account, and is `blocked` until
+   *  the owner allows it. `value` is `allowed` or `blocked`.
    *
-   *  The owner key's request key signs the change, `setting.owner_replacement`
-   *  or `setting.verdifax_deletion`, over the account's label and the value,
+   *  The owner key's request key signs the change, such as
+   *  `setting.owner_replacement` or `setting.owner_reads`, over the account's label and the value,
    *  and the record seals the signature, so Verdifax cannot make the change
    *  itself. The server refuses an unsigned owner change, so this needs the
    *  `signingKey` option and refuses to send without it. The label,
@@ -1039,7 +1044,7 @@ export class VerdifaxClient {
     this.requireAPIKey();
     if (!Object.hasOwn(ACCOUNT_SETTING_CHANGES, setting)) {
       throw new VerdifaxError(
-        "verdifax: setAccountSetting setting must be owner-replacement, verdifax-deletion or verdifax-stop",
+        "verdifax: setAccountSetting setting must be owner-replacement, verdifax-deletion, verdifax-stop or owner-reads",
       );
     }
     if (!ACCOUNT_SETTING_VALUES.has(value)) {

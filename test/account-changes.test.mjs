@@ -205,6 +205,14 @@ test("setAccountSetting signs setting.owner_replacement for owner-replacement", 
   assert.equal(result.account_change, null);
 });
 
+test("setAccountSetting signs setting.owner_reads for owner-reads", async () => {
+  const answer = { ok: true, setting: "owner-reads", value: "allowed", account_change: null };
+  const { seen } = await withServer(ownerServer({ json: answer }), (c) => c.setAccountSetting("owner-reads", "allowed"), { signingKey: SEED });
+  assert.deepEqual(requests(seen), ["GET /account", "PUT /account/settings/owner-reads"]);
+  assert.ok(ownerVerifies(seen[1].body.owner_signature, "account-7", "setting.owner_reads", "allowed"));
+  assert.ok(!ownerVerifies(seen[1].body.owner_signature, "account-7", "setting.verdifax_stop", "allowed"));
+});
+
 test("setAccountSetting with accountId signs over it and does not read GET /account", async () => {
   const { seen } = await withServer(
     (req, body) => sealedAnswer(req, body),
@@ -218,7 +226,7 @@ test("setAccountSetting with accountId signs over it and does not read GET /acco
 test("setAccountSetting refuses a setting or value outside the server's before sending", async () => {
   const { seen } = await withServer(ownerServer({}), async (c) => {
     for (const setting of ["owner_replacement", "verdifax_deletion", "verdifax_stop", "Owner-Replacement", "", undefined, "constructor", "toString"]) {
-      await assert.rejects(c.setAccountSetting(setting, "blocked"), (err) => err instanceof VerdifaxError && /setting must be owner-replacement, verdifax-deletion or verdifax-stop/.test(err.message));
+      await assert.rejects(c.setAccountSetting(setting, "blocked"), (err) => err instanceof VerdifaxError && /setting must be owner-replacement, verdifax-deletion, verdifax-stop or owner-reads/.test(err.message));
     }
     for (const value of ["Blocked", "block", "", true, undefined, null]) {
       await assert.rejects(c.setAccountSetting("verdifax-deletion", value), (err) => err instanceof VerdifaxError && /value must be allowed or blocked/.test(err.message));

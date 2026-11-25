@@ -342,6 +342,8 @@ The account's view covers the runs its keys made through Verdifax. It does not c
 
 The owner sets two blocks on Verdifax with `setAccountSetting(setting, value)`. While `owner-replacement` is `blocked`, Verdifax cannot replace, revoke or start a replacement of the owner key, and from verifier v0.35.0's server release on it cannot clear the owner key's request key either. While `verdifax-deletion` is `blocked`, Verdifax cannot delete one of the account's records. `value` is `allowed` or `blocked`, and `getAccount` shows both as `owner_replacement` and `verdifax_deletion`. Each change is sealed in the account's signal feed as an `account.changed` event. Asking for the value already set changes nothing, and `account_change` is then null.
 
+The `owner-reads` setting decides whether the owner key reads the account's records. While it is `allowed`, the owner key opens the record, receipts and reports of every run of the account; it is `blocked` until the owner allows it, and the change is signed and sealed as the others are.
+
 `deleteRun(runId, recordHash)` deletes one of the account's records. `recordHash` is a completed run's `record_hash`, or a stopped run's receipt hash, and the server refuses a hash that is not this run's with an HTTP 409. A public record must be withdrawn first with `unpublishRun`. The record's tombstone, which names the exact record, stays in the signal feed as a `run.deleted` event.
 
 ```typescript

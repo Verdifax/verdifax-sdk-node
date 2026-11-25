@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.18.0
+
+The owner-reads setting.
+
+- `setAccountSetting` takes `owner-reads`: while `allowed`, the owner key opens the record, receipts and reports of every run of its account; it is `blocked` until the owner allows it, so every account reads as it did. The change is signed by the owner key's request key over `setting.owner_reads` and sealed in the account's feed; `verdifax-verify` v0.40.0 reads it. `getAccount` reports it as `owner_reads`. Needs the server that accepts it.
+- `AccountChangeAction` lists every action in the server's order again: `webhook.subscribed`, `webhook.deleted`, `setting.verdifax_stop` and `setting.owner_reads` join it. A newer action is still read as sent.
+- The user agent is `verdifax-sdk-node/1.18.0`.
+
 ## 1.17.1
 
 `verifyWebhook` removes a secret's trailing `=` padding in one pass from the end instead of with a regular expression, so the time it takes grows with the secret's length and never faster (GitHub code scanning, js/polynomial-redos). Every secret is accepted or refused exactly as in 1.17.0: the check before it already allowed at most two `=` characters, so no secret could reach the slow case.

@@ -905,6 +905,10 @@ test("the typed models carry the two new actions, request_key_approval, the page
         "setting.verdifax_deletion",
         "request_key.registered",
         "request_key.rotated",
+        "webhook.subscribed",
+        "webhook.deleted",
+        "setting.verdifax_stop",
+        "setting.owner_reads",
       ],
       file,
     );

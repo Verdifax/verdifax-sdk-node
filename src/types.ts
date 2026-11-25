@@ -942,10 +942,15 @@ export interface Account {
    *  while `blocked`, Verdifax cannot delete one. Set with
    *  {@link VerdifaxClient.setAccountSetting}. */
   verdifax_deletion?: AccountSettingValue;
+  /** Whether the owner key reads the account's records: while `allowed` it
+   *  opens the record, receipts and reports of every run of the account, and it is
+   *  `blocked` until the owner allows it with
+   *  {@link VerdifaxClient.setAccountSetting}. */
+  owner_reads?: AccountSettingValue;
 }
 
-/** One of the owner's blocks on Verdifax, as its route names it. */
-export type AccountSetting = "owner-replacement" | "verdifax-deletion" | "verdifax-stop";
+/** One of the owner's settings, as its route names it. */
+export type AccountSetting = "owner-replacement" | "verdifax-deletion" | "verdifax-stop" | "owner-reads";
 
 /** A setting's value. */
 export type AccountSettingValue = "allowed" | "blocked";
@@ -975,7 +980,11 @@ export type AccountChangeAction =
   | "setting.owner_replacement"
   | "setting.verdifax_deletion"
   | "request_key.registered"
-  | "request_key.rotated";
+  | "request_key.rotated"
+  | "webhook.subscribed"
+  | "webhook.deleted"
+  | "setting.verdifax_stop"
+  | "setting.owner_reads";
 
 /** A key's current request key approving the change to its next one, as an
  *  account change seals it: its signature over the new public key, or over
